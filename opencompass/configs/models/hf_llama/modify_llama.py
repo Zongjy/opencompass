@@ -106,9 +106,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=False
         )
-        self.rotary_emb = LlamaRotaryEmbedding(
-            self.config
-        )
+        self.rotary_emb = LlamaRotaryEmbedding(self.config)
 
         self.heavy_budget_ratio = config.heavy_ratio
         self.recent_budget_ratio = config.recent_ratio
@@ -128,9 +126,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
-
         query_states = (
             self.q_proj(hidden_states)
             .view(bsz, q_len, self.num_heads, self.head_dim)
@@ -313,7 +311,7 @@ class H2OLLAMABenchmarkRunner(HuggingFaceBaseModel):
             max_seq_len=max_seq_len,
             pad_token_id=pad_token_id,
             stop_words=stop_words,
-            drop_middle=drop_middle
+            drop_middle=drop_middle,
         )
 
     def _load_model(
@@ -323,11 +321,9 @@ class H2OLLAMABenchmarkRunner(HuggingFaceBaseModel):
         peft_path: Optional[str] = None,
         peft_kwargs: dict = dict(),
     ):
-        # self.logger("load modified model")
-        # exit(0)
         from transformers import AutoModel, AutoModelForCausalLM
 
-        DEFAULT_MODEL_KWARGS = dict(device_map="auto", trust_remote_code=True)
+        DEFAULT_MODEL_KWARGS = dict(device_map="cpu", trust_remote_code=True)
         model_kwargs = DEFAULT_MODEL_KWARGS
         model_kwargs.update(kwargs)
         model_kwargs = _set_model_kwargs_torch_dtype(model_kwargs)
@@ -337,6 +333,11 @@ class H2OLLAMABenchmarkRunner(HuggingFaceBaseModel):
 
         try:
             self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
+            config = AutoConfig.from_pretrained(path)
+            config.heavy_ratio = self.heavy_ratio
+            config.recent_ratio = self.recent_ratio
+            self.model = convert_kvcache_llama_heavy_recent(self.model, config)
+            self.model = self.model.cuda()
         except ValueError:
             self.model = AutoModel.from_pretrained(path, **model_kwargs)
 
@@ -346,7 +347,5 @@ class H2OLLAMABenchmarkRunner(HuggingFaceBaseModel):
             peft_kwargs["is_trainable"] = False
             self.model = PeftModel.from_pretrained(self.model, peft_path, **peft_kwargs)
 
-        config = AutoConfig.from_pretrained(path)
-        config.heavy_ratio = self.heavy_ratio
         self.model.eval()
         self.model.generation_config.do_sample = False
