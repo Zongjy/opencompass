@@ -337,7 +337,7 @@ class H2OLLAMABenchmarkRunner(HuggingFaceBaseModel):
             config.heavy_ratio = self.heavy_ratio
             config.recent_ratio = self.recent_ratio
             self.model = convert_kvcache_llama_heavy_recent(self.model, config)
-            self.model = self.model.cuda()
+            self.model = self.model.half().cuda()
         except ValueError:
             self.model = AutoModel.from_pretrained(path, **model_kwargs)
 
