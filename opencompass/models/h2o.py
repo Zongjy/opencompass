@@ -486,8 +486,8 @@ class SparseLlamaAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            heavy_budget_ratio = self.heavy_budget_ratio
-            recent_budget_ratio = self.recent_budget_ratio
+            heavy_budget_ratio = self.heavy_budget_ratio,
+            recent_budget_ratio = self.recent_budget_ratio,
             **kwargs,
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -495,7 +495,7 @@ class SparseLlamaAttention(nn.Module):
         return attn_output, attn_weights
 
 # 定义替换函数
-def replace_attention_with_layer_index(model,heavy_hitter_ratio=0.6,recent_ratio=0.6):
+def replace_attention_with_layer_index(model, heavy_hitter_ratio=0.6,recent_ratio=0.6):
     from transformers.models.llama.modeling_llama import LlamaAttention
     # 遍历模型的所有层
     for layer_idx, layer in enumerate(model.model.layers):
@@ -638,7 +638,7 @@ def _set_model_kwargs_torch_dtype(model_kwargs):
 
 @MODELS.register_module()
 class H2OLlamaAttentionConvert_1(BaseModel):
-    """Model wrapper for HuggingFace models designed for chat.
+    """Model wrapper for     HuggingFace models designed for chat.
 
     Args:
         mode (str, optional): The method of input truncation when input length
@@ -662,6 +662,7 @@ class H2OLlamaAttentionConvert_1(BaseModel):
                  stop_words: Optional[str] = [],
                  mode: str = 'none',
                  **other_kwargs):
+        
 
         self.logger = get_logger()
         self.path = path
@@ -681,6 +682,8 @@ class H2OLlamaAttentionConvert_1(BaseModel):
         for k, v in other_kwargs.items():
             if v is not None:
                 self.logger.warning(f'Unused argument {k}={v}')
+
+        self.other_kwargs = other_kwargs
 
     def _load_tokenizer(self, path: Optional[str], kwargs: dict, pad_token_id: Optional[int] = None):
         from transformers import AutoTokenizer, GenerationConfig
@@ -725,22 +728,27 @@ class H2OLlamaAttentionConvert_1(BaseModel):
 
 
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
-        # =================== 对推理进行监视 ===================
-        # 初始化监控器并注册钩子
-        from .profile_utils.timing_utils import global_monitor
-       
-        global_monitor.register_hooks(self.model)
-
-        print(self.model)
         # =================== 在这里将注意力层替换为自定义的注意力层 ===================
-        replace_attention_with_layer_index(self.model,self.heavy_ratio,self.recent_ratio)
-        self.model = self.model.half().cuda()
-        print(self.model)
-        print(self.model.config.torch_dtype)  # 输出: torch.float16
+        self.heavy_ratio = 0.6
+        self.recent_ratio = 0.6
+        # replace_attention_with_layer_index(model = self.model, heavy_hitter_ratio = self.heavy_ratio,recent_ratio = self.recent_ratio)
+        # self.model = self.model.half().cuda()
         # =================== 替换snapkv ===============================  
         # from snapkv.monkeypatch.monkeypatch import replace_mistral,replace_llama
         # replace_llama() 
-  
+
+
+
+        # =================== 对推理进行监视 ===================
+        from opencompass.models.profile_utils.timing_utils import global_monitor
+        if not hasattr(global_monitor, '_hooks_registered'):
+            global_monitor.register_hooks(self.model)
+            global_monitor._hooks_registered = True
+        # =================== 对推理进行监视 ===================
+
+
+
+
         if peft_path is not None:
             from peft import PeftModel
             peft_kwargs['is_trainable'] = False
