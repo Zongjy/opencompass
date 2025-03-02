@@ -19,7 +19,7 @@ _ice_template = dict(
             dict(
                 role='HUMAN',
                 prompt=
-                '{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\nE. {E}\nAnswer:',
+                '\n{question}\nA. {A}\nB. {B}\nC. {C}\nD. {D}\nE. {E}\nAnswer:',
             ),
             dict(
                 role='BOT',

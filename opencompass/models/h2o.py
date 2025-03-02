@@ -104,326 +104,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-
-
-class H2OKVCache_LayerWise:
-    def __init__(
-        self,
-        hh_size=4,
-        recent_size=512,
-        k_seq_dim=2,
-        v_seq_dim=2,
-    ):
-        print(f"H2OKVCache-LayerWise: {hh_size}, {recent_size}")
-        self.hh_size = hh_size
-        self.recent_size = recent_size
-        self.cache_size = hh_size + recent_size
-        self.k_seq_dim = k_seq_dim
-        self.v_seq_dim = v_seq_dim
-        self.hh_score = None
-
-    def __call__(self, past_key_values, attn_score_cache):
-
-        self._update_hh_score(attn_score_cache)
-
-        if past_key_values is None:
-            return (None,None)
-        
-
-
-        key_states = past_key_values.key_cache[self.layer_idx]  
-        value_states = past_key_values.value_cache[self.layer_idx]
-
-
-        # 获取序列长度
-        seq_len = key_states.size(self.k_seq_dim)
-        
-        if seq_len <= self.cache_size:
-            return past_key_values
-
-        # hh-selection
-        bsz, num_heads, _, head_dim = key_states.shape
-
-        select_hh_scores = self.hh_score[:, :seq_len - self.recent_size]
-        _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
-        keep_topk = keep_topk.sort().values
-
-        
-        keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
-        keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
-
-        mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(key_states.device)
-        mask = mask.scatter(-1, keep_idx, 1)
-
-        # 调整 key_states 和 value_states 的索引
-        key_states_flat = key_states.view(bsz * num_heads, seq_len, head_dim)
-        value_states_flat = value_states.view(bsz * num_heads, seq_len, head_dim)
-        mask = mask.unsqueeze(-1).expand(-1, -1, head_dim)  # [bsz * num_kv_heads, seq_len, head_dim]
-
-        k_hh_recent = key_states_flat.squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = value_states_flat.squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-
-        self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
-
-        # 更新 DynamicCache
-        past_key_values.key_cache[self.layer_idx] = k_hh_recent
-        past_key_values.value_cache[self.layer_idx] = v_hh_recent
-
-        return past_key_values
-
-    def _update_hh_score(self, attn_score_cache):
-
-        num_new_tokens = attn_score_cache.shape[2]
-        print("attention_score_cache", attn_score_cache.size())
-    
-        # 假设 GQA 分组，例如 num_query_heads=32, num_kv_heads=8
-        bsz, num_query_heads, seq_len, _ = attn_score_cache.shape
-        num_kv_heads = 8  # 从 key_states 获取 num_kv_heads
-        num_groups = num_query_heads // num_kv_heads  # 每个键/值头对应的查询头数量
-    
-        # 对注意力分数按组求和
-        attn_score_cache = attn_score_cache.view(bsz, num_kv_heads, num_groups, seq_len, seq_len)
-        attn_score_cache = attn_score_cache.sum(dim=2)  # 聚合组内查询头，形状 [bsz, num_kv_heads, seq_len, seq_len]
-        attn_score_cache = attn_score_cache.sum(dim=-1)  # 求和得到 [bsz, num_kv_heads, seq_len]
-        
-        if self.hh_score is None:
-            self.hh_score = attn_score_cache.view(bsz * num_kv_heads, seq_len)
-            print(f"hh_score.shape: {self.hh_score.shape}")
-        else:
-            attn_score_cache = attn_score_cache.view(bsz * num_kv_heads, seq_len)
-            attn_score_cache[:, :-num_new_tokens] += self.hh_score
-            self.hh_score = attn_score_cache
-
-    def _clean_scores(self):
-        self.hh_score = None
-
-class Heavy_HitterLlamaAttention(nn.Module):
-    """LLaMA 3 稀疏注意力层（最近 R + 重击 H 策略）"""
-
-    def __init__(self, config, layer_idx=None, dtype=torch.float16):
-        super().__init__()
-        if layer_idx == 0:
-            print("========= Using Sparse H2O-A Attention (Recent R + Heavy H) =========")
-
-        self.config = config
-        self.layer_idx = layer_idx
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.attention_dropout = config.attention_dropout
-
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias, dtype=dtype)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias, dtype=dtype)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias, dtype=dtype)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias, dtype=dtype)
-
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
-
-        # H2O-A 参数
-        # self.recent_budget_ratio = config.recent_budget_ratio  
-        # self.heavy_budget_ratio = config.heavy_budget_ratio  
-        self.heavy_hitter_scores = None  # 存储 Token 累积注意力
-
-        self.kv_cache = H2OKVCache_LayerWise(
-            hh_size=4,
-            recent_size=512,
-            k_seq_dim=2,
-            v_seq_dim=2,
-        )
-
-        self.kv_cache.layer_idx = layer_idx
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        position_ids=None,
-        past_key_value:Optional[Tuple[torch.Tensor]] = None,
-        output_attentions=False,
-        use_cache=False,
-        cache_position=None,
-        position_embeddings=None,
-        **kwargs,
-    ):
-        bsz, q_len, _ = hidden_states.size()
-
-        # **Step 1: 计算 Q, K, V**
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        # **Step 2: 旋转位置编码（RoPE）**
-        if position_embeddings is None:
-            cos, sin = self.rotary_emb(value_states, position_ids)
-        else:
-            cos, sin = position_embeddings
-
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        # **Step 3: 处理 KV 缓存**
-        if past_key_value is not None:
-            # 更新 DynamicCache
-            past_key_value.update(
-                key_states=key_states,
-                value_states=value_states,
-                layer_idx=self.layer_idx,
-            )
-            # 从 DynamicCache 中提取当前层的 key 和 value
-            key_states = past_key_value.key_cache[self.layer_idx]
-            value_states = past_key_value.value_cache[self.layer_idx]
-
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-   
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float16).to(query_states.dtype)
-
-
-        past_key_value = self.kv_cache(past_key_value, attn_weights.detach().clone())
-
-        attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-
-        # **Step 10: 计算最终注意力输出**
-        attn_output = torch.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights
-
-
-class SparseLlamaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config, layer_idx: Optional[int] = None):
-        if layer_idx == 0:
-            print("=========using h20=======================")
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.attention_dropout = config.attention_dropout
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
-        self.is_causal = True
-
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias,dtype=torch.float16)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias,dtype=torch.float16)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias,dtype=torch.float16)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias,dtype=torch.float16)
-
-        # TODO (joao): remove in v4.46 (RoPE is computed in the model, not in the decoder layers)
-        # self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-
-        self.heavy_budget_ratio = 0.6
-        self.recent_budget_ratio = 0.6
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # ============================ h2o =============================================
-        # attn_weights:[bsz, num_heads, q_len, k_len]
-        heavy_budget = int(self.heavy_budget_ratio * attn_weights.shape[-1])
-        recent_budget = int(self.recent_budget_ratio * attn_weights.shape[-1])
-        # Heavy Hitter Mask (Based on global statistics)
-        tmp_attn = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float16).to(attn_weights.dtype)
-        
-        tmp_sum = torch.sum(tmp_attn, dim=-2) 
-        _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
-
-        zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
-        mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
-        mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_weights.shape[-2], mask_bottom.shape[-1])
-
-        ones = torch.ones_like(attn_weights, dtype=torch.bool)
-        ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
-        ones = torch.tril(ones, diagonal=-recent_budget)   # 后 recent_budget
-        mask_bottom = torch.logical_or(mask_bottom, ones)
-        # mask_bottom = ones
-        attn_weights[~mask_bottom] = torch.finfo(attn_weights.dtype).min
-        
-        # ============================ h2o =============================================
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float16).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights
-
-
 def eager_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -549,15 +229,48 @@ def flex_attention_forward(
 
     return attn_output, attention_weights
 
+def apply_h2o_attention_mask(
+    attn_scores: torch.Tensor,
+    heavy_budget_ratio: float,
+    recent_budget_ratio: float
+) -> torch.Tensor:
+    if attn_scores is None:
+        return attn_scores
+        
+    # 计算预算
+    heavy_budget = int(heavy_budget_ratio * attn_scores.shape[-1])
+    recent_budget = int(recent_budget_ratio * attn_scores.shape[-1])
+    
+    # Heavy Hitter Mask (基于全局统计)
+    tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
+    tmp_sum = torch.sum(tmp_attn, dim=-2)
+    _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
+    
+    zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
+    mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
+    mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
+    
+    ones = torch.ones_like(attn_scores, dtype=torch.bool)
+    ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
+    ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
+    mask_bottom = torch.logical_or(mask_bottom, ones)
+    
+    # 将非重击者和非最近关注区域的权重设为负无穷
+    masked_scores = attn_scores.clone()
+    masked_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
+    
+    return masked_scores
 
 def pure_scaled_dot_product_attention(
+    heavy_budget_ratio: float,
+    recent_budget_ratio: float,
     query: torch.Tensor, 
     key: torch.Tensor, 
     value: torch.Tensor, 
     attn_mask: Optional[torch.Tensor] = None, 
     dropout_p: float = 0.0, 
     scale: Optional[float] = None,
-    is_causal: bool = False
+    is_causal: bool = False,
 ) -> torch.Tensor:
 
     batch_size, num_heads, seq_len_q, head_dim = query.shape
@@ -584,28 +297,33 @@ def pure_scaled_dot_product_attention(
             attn_scores = attn_scores + attn_mask
 
     # ============================================ h2o ============================================
-    if attn_scores is not None:  # 确保 attn_weights 可用
-        # attn_weights: [bsz, num_heads, q_len, k_len]
-        heavy_budget = int(0.6 * attn_scores.shape[-1])
-        recent_budget = int(0.6 * attn_scores.shape[-1])
+    # if attn_scores is not None:  # 确保 attn_weights 可用
+    #     # attn_weights: [bsz, num_heads, q_len, k_len]
+    #     heavy_budget = int(heavy_budget_ratio * attn_scores.shape[-1])
+    #     recent_budget = int(recent_budget_ratio * attn_scores.shape[-1])
 
-        # Heavy Hitter Mask (基于全局统计)
-        tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
-        tmp_sum = torch.sum(tmp_attn, dim=-2)
-        _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
+    #     # Heavy Hitter Mask (基于全局统计)
+    #     tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
+    #     tmp_sum = torch.sum(tmp_attn, dim=-2)
+    #     _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
 
-        zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
-        mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
-        mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
+    #     zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
+    #     mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
+    #     mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
 
-        ones = torch.ones_like(attn_scores, dtype=torch.bool)
-        ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
-        ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
-        mask_bottom = torch.logical_or(mask_bottom, ones)
+    #     ones = torch.ones_like(attn_scores, dtype=torch.bool)
+    #     ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
+    #     ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
+    #     mask_bottom = torch.logical_or(mask_bottom, ones)
 
-        # 将非重击者和非最近关注区域的权重设为负无穷
-        attn_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
+    #     attn_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
 
+        # 应用H2O注意力掩码
+    attn_scores = apply_h2o_attention_mask(
+        attn_scores, 
+        heavy_budget_ratio, 
+        recent_budget_ratio
+    )
     # ============================================ h2o ============================================    
 
     attn_weights = F.softmax(attn_scores, dim=-1)
@@ -627,6 +345,8 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
     is_causal: Optional[bool] = None,
+    heavy_budget_ratio: float = 0.0,
+    recent_budget_ratio: float = 0.0,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
     # print("=====================================sdpa_attention_forward")  
@@ -664,15 +384,17 @@ def sdpa_attention_forward(
     #     is_causal=is_causal,
     # )
 
-    # 使用我们的纯PyTorch实现的scaled_dot_product_attention
+    # 纯PyTorch实现的scaled_dot_product_attention
     attn_output = pure_scaled_dot_product_attention(
+        heavy_budget_ratio,
+        recent_budget_ratio,
         query,
         key,
         value,
         attn_mask=causal_mask,
         dropout_p=dropout,
         scale=scaling,
-        is_causal=is_causal
+        is_causal=is_causal,
     )
     
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -691,7 +413,7 @@ ALL_ATTENTION_FUNCTIONS.update(
 )
 
 
-class SparseLlamaAttention1(nn.Module):
+class SparseLlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper with H2O sparse attention"""
 
     def __init__(self, config: LlamaConfig, layer_idx: int):
@@ -705,8 +427,8 @@ class SparseLlamaAttention1(nn.Module):
         self.is_causal = True
 
         # H2O 参数
-        self.heavy_budget_ratio = 0.6  # 重击者预算比例
-        self.recent_budget_ratio = 0.6  # 最近关注预算比例
+        self.heavy_budget_ratio = self.config.heavy_budget_ratio  # 重击者预算比例
+        self.recent_budget_ratio = self.config.recent_budget_ratio  # 最近关注预算比例
 
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
@@ -764,57 +486,24 @@ class SparseLlamaAttention1(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
+            heavy_budget_ratio = self.heavy_budget_ratio
+            recent_budget_ratio = self.recent_budget_ratio
             **kwargs,
         )
-
-        # ============================ H2O Sparse Attention Start =============================================
-        # if attn_weights is not None:  # 确保 attn_weights 可用
-        #     # attn_weights: [bsz, num_heads, q_len, k_len]
-        #     heavy_budget = int(self.heavy_budget_ratio * attn_weights.shape[-1])
-        #     recent_budget = int(self.recent_budget_ratio * attn_weights.shape[-1])
-
-        #     # Heavy Hitter Mask (基于全局统计)
-        #     tmp_attn = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float16).to(attn_weights.dtype)
-        #     tmp_sum = torch.sum(tmp_attn, dim=-2)
-        #     _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
-
-        #     zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
-        #     mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
-        #     mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_weights.shape[-2], mask_bottom.shape[-1])
-
-        #     ones = torch.ones_like(attn_weights, dtype=torch.bool)
-        #     ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
-        #     ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
-        #     mask_bottom = torch.logical_or(mask_bottom, ones)
-
-        #     # 将非重击者和非最近关注区域的权重设为负无穷
-        #     attn_weights[~mask_bottom] = torch.finfo(attn_weights.dtype).min
-
-        #     # 重新计算注意力输出
-        #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float16).to(query_states.dtype)
-        #     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        #     attn_output = torch.matmul(attn_weights, value_states)
-        # ============================ H2O Sparse Attention End =============================================
-
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
-  
-import logging
-# 配置日志
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-
 # 定义替换函数
-def replace_attention_with_layer_index(model):
+def replace_attention_with_layer_index(model,heavy_hitter_ratio=0.6,recent_ratio=0.6):
     from transformers.models.llama.modeling_llama import LlamaAttention
     # 遍历模型的所有层
     for layer_idx, layer in enumerate(model.model.layers):
         if hasattr(layer, 'self_attn') and isinstance(layer.self_attn, LlamaAttention):
             # 创建自定义注意力层并传入层号
-            custom_attn = SparseLlamaAttention1(layer.self_attn.config, layer_idx=layer_idx)
+            layer.self_attn.config.heavy_budget_ratio = heavy_hitter_ratio
+            layer.self_attn.config.recent_budget_ratio = recent_ratio
+            custom_attn = SparseLlamaAttention(layer.self_attn.config, layer_idx=layer_idx)
             custom_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
             # 替换原始注意力层
             layer.self_attn = custom_attn
@@ -1036,9 +725,15 @@ class H2OLlamaAttentionConvert_1(BaseModel):
 
 
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
+        # =================== 对推理进行监视 ===================
+        # 初始化监控器并注册钩子
+        from .profile_utils.timing_utils import global_monitor
+       
+        global_monitor.register_hooks(self.model)
+
         print(self.model)
         # =================== 在这里将注意力层替换为自定义的注意力层 ===================
-        replace_attention_with_layer_index(self.model)
+        replace_attention_with_layer_index(self.model,self.heavy_ratio,self.recent_ratio)
         self.model = self.model.half().cuda()
         print(self.model)
         print(self.model.config.torch_dtype)  # 输出: torch.float16

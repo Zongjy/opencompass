@@ -131,7 +131,7 @@ class GenInferencer(BaseInferencer):
         dataloader = self.get_dataloader(prompt_list[index:], self.batch_size)
 
         # 5. Inference for prompts in each batch
-        logger.info('Starting inference process...')
+        logger.info('Starting inference process gen_inference ...')
 
         start_time_stamp = time.time()
         num_sample = 0
@@ -176,6 +176,10 @@ class GenInferencer(BaseInferencer):
             num_sample += len(datum)
 
         end_time_stamp = time.time()
+        #  =========================输出推理时间=========================
+        from opencompass.models.profile_utils.timing_utils import global_monitor
+        global_monitor.report()
+        #  =========================输出推理时间=========================
 
         # 6. Output
         if self.is_main_process:
