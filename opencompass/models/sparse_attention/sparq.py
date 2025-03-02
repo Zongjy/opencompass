@@ -229,41 +229,45 @@ def flex_attention_forward(
 
     return attn_output, attention_weights
 
-def apply_h2o_attention_mask(
-    attn_scores: torch.Tensor,
-    heavy_budget_ratio: float,
-    recent_budget_ratio: float
-) -> torch.Tensor:
-    if attn_scores is None:
-        return attn_scores
-        
-    # 计算预算
-    heavy_budget = int(heavy_budget_ratio * attn_scores.shape[-1])
-    recent_budget = int(recent_budget_ratio * attn_scores.shape[-1])
+# 添加SparQ Attention所需函数
+def gather(t, dim, i):
+    """Gather values along an axis specified by dim."""
+    dim += (dim < 0) * t.ndim
+    return t.gather(dim, i.expand(*t.shape[:dim], i.shape[dim], *t.shape[dim + 1:]))
+
+def attn(Q, K, V, M):
+    """Standard attention calculation."""
+    s = (Q @ K.transpose(-1, -2)) / math.sqrt(Q.shape[-1]) + M
+    y = torch.softmax(s, dim=-1) @ V
+    return y
+
+def sparq_attn(Q, K, V, V_mean, M, r, k):
+    # 1. Approximate attention scores using r largest components of Q
+    i1 = torch.topk(torch.abs(Q).sum(dim=2, keepdim=True), r, -1).indices
+    Q_hat, K_hat = gather(Q, -1, i1), gather(K, -1, i1)
+    scale = torch.sqrt(
+        Q.shape[-1] * torch.abs(Q_hat).sum(dim=-1, keepdim=True) / 
+        torch.abs(Q).sum(dim=-1, keepdim=True)
+    )
     
-    # Heavy Hitter Mask (基于全局统计)
-    tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
-    tmp_sum = torch.sum(tmp_attn, dim=-2)
-    _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
+    s_hat = torch.softmax(Q_hat @ K_hat.transpose(-1, -2) / scale + M, dim=-1)
     
-    zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
-    mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
-    mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
+    # 2. Gather top k positions based on approximate attention scores & run attention
+    i2 = torch.topk(s_hat.sum(dim=2, keepdim=True), k, -1).indices
+    iKV = i2[..., 0, :, None]
+    K_selected = gather(K, -2, iKV)
+    V_selected = gather(V, -2, iKV)
+    M_selected = gather(M, -1, i2)
     
-    ones = torch.ones_like(attn_scores, dtype=torch.bool)
-    ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
-    ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
-    mask_bottom = torch.logical_or(mask_bottom, ones)
+    y_ = attn(Q, K_selected, V_selected, M_selected)
     
-    # 将非重击者和非最近关注区域的权重设为负无穷
-    masked_scores = attn_scores.clone()
-    masked_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
+    # 3. Estimate the total score of the top k, and interpolate with V_mean
+    alpha = gather(s_hat, -1, i2).sum(-1, keepdim=True)
+    y = alpha * y_ + (1 - alpha) * V_mean
     
-    return masked_scores
+    return y
 
 def pure_scaled_dot_product_attention(
-    heavy_budget_ratio: float,
-    recent_budget_ratio: float,
     query: torch.Tensor, 
     key: torch.Tensor, 
     value: torch.Tensor, 
@@ -271,70 +275,81 @@ def pure_scaled_dot_product_attention(
     dropout_p: float = 0.0, 
     scale: Optional[float] = None,
     is_causal: bool = False,
+    heavy_budget_ratio: float = 0.6,
+    recent_budget_ratio: float = 0.6,
 ) -> torch.Tensor:
 
     batch_size, num_heads, seq_len_q, head_dim = query.shape
     _, _, seq_len_k, _ = key.shape
     
-   
     if scale is None:
         scale = 1.0 / math.sqrt(head_dim)
     
-    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
-    
-    if is_causal:
-        causal_mask = torch.triu(
-            torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
-            diagonal=1
+    # 检查是否需要应用稀疏注意力
+    if seq_len_k > 1024 and heavy_budget_ratio < 1.0:  # 对长序列应用稀疏注意力
+        # 准备掩码``
+        if attn_mask is None and is_causal:
+            causal_mask = torch.triu(
+                torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
+                diagonal=1
+            )
+            attn_mask = torch.full(
+                (seq_len_q, seq_len_k), 
+                float('-inf'), 
+                device=query.device
+            )
+            attn_mask.masked_fill_(~causal_mask, 0)
+        
+        # 计算要选择的token数量
+        heavy_budget = int(heavy_budget_ratio * seq_len_k)
+        recent_budget = min(int(recent_budget_ratio * seq_len_k), seq_len_k)
+        
+        # 保证至少有一些heavy hitters和recent tokens
+        heavy_budget = max(32, heavy_budget)
+        recent_budget = max(32, recent_budget)
+        
+        # SparQ算法参数
+        r = min(head_dim, 16)  # 用于近似的维度数量
+        k = heavy_budget      # 要选择的top-k位置
+        
+        # 计算均值作为插值基准
+        V_mean = value.mean(dim=2, keepdim=True)
+        
+        # 应用SparQ注意力
+        attn_output = sparq_attn(
+            query, 
+            key, 
+            value, 
+            V_mean, 
+            attn_mask if attn_mask is not None else 0, 
+            r, 
+            k
         )
-        attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
-    
-    
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
-        else:
-            attn_scores = attn_scores + attn_mask
+    else:
+        # 标准注意力计算
+        attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
+        
+        if is_causal:
+            causal_mask = torch.triu(
+                torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
+                diagonal=1
+            )
+            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
+        
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
+            else:
+                attn_scores = attn_scores + attn_mask
 
-    # ============================================ h2o ============================================
-    # if attn_scores is not None:  # 确保 attn_weights 可用
-    #     # attn_weights: [bsz, num_heads, q_len, k_len]
-    #     heavy_budget = int(heavy_budget_ratio * attn_scores.shape[-1])
-    #     recent_budget = int(recent_budget_ratio * attn_scores.shape[-1])
-
-    #     # Heavy Hitter Mask (基于全局统计)
-    #     tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
-    #     tmp_sum = torch.sum(tmp_attn, dim=-2)
-    #     _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
-
-    #     zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
-    #     mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
-    #     mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
-
-    #     ones = torch.ones_like(attn_scores, dtype=torch.bool)
-    #     ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
-    #     ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
-    #     mask_bottom = torch.logical_or(mask_bottom, ones)
-
-    #     attn_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
-
-        # 应用H2O注意力掩码
-    attn_scores = apply_h2o_attention_mask(
-        attn_scores, 
-        heavy_budget_ratio, 
-        recent_budget_ratio
-    )
-    # ============================================ h2o ============================================    
-
-    attn_weights = F.softmax(attn_scores, dim=-1)
-    
-    if dropout_p > 0.0:
-        attn_weights = F.dropout(attn_weights, p=dropout_p)
-    
-    attn_output = torch.matmul(attn_weights, value)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        
+        if dropout_p > 0.0:
+            attn_weights = F.dropout(attn_weights, p=dropout_p)
+        
+        attn_output = torch.matmul(attn_weights, value)
     
     return attn_output
-
 
 def sdpa_attention_forward(
     module: torch.nn.Module,
@@ -345,11 +360,9 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
     is_causal: Optional[bool] = None,
-    heavy_budget_ratio: float = 0.0,
-    recent_budget_ratio: float = 0.0,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
-    # print("=====================================sdpa_attention_forward")  
+    """Forward pass for scaled dot product attention with optional sparse attention."""
     if hasattr(module, "num_key_value_groups"):
         key = repeat_kv(key, module.num_key_value_groups)
         value = repeat_kv(value, module.num_key_value_groups)
@@ -358,36 +371,25 @@ def sdpa_attention_forward(
     if attention_mask is not None:
         causal_mask = causal_mask[:, :, :, : key.shape[-2]]
 
-    # SDPA with memory-efficient backend is bugged with non-contiguous inputs and custom attn_mask for some torch versions
-    # Reference: https://github.com/pytorch/pytorch/issues/112577.
+    # Ensure contiguous tensors for SDPA
     query = query.contiguous()
     key = key.contiguous()
     value = value.contiguous()
 
-    # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-    # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+    # Determine if causal attention should be used
     if is_causal is None:
         is_causal = causal_mask is None and query.shape[2] > 1
 
-    # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-    # We convert it to a bool for the SDPA kernel that only accepts bools.
+    # Handle JIT tracing
     if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
         is_causal = is_causal.item()
 
-    # attn_output = torch.nn.functional.scaled_dot_product_attention(
-    #     query,
-    #     key,
-    #     value,
-    #     attn_mask=causal_mask,
-    #     dropout_p=dropout,
-    #     scale=scaling,
-    #     is_causal=is_causal,
-    # )
+    # 获取稀疏性参数
+    heavy_budget_ratio = getattr(module, "heavy_budget_ratio", 0.6)
+    recent_budget_ratio = getattr(module, "recent_budget_ratio", 0.6)
 
-    # 纯PyTorch实现的scaled_dot_product_attention
+    # 使用纯PyTorch实现的scaled_dot_product_attention，支持稀疏注意力
     attn_output = pure_scaled_dot_product_attention(
-        heavy_budget_ratio,
-        recent_budget_ratio,
         query,
         key,
         value,
@@ -395,6 +397,8 @@ def sdpa_attention_forward(
         dropout_p=dropout,
         scale=scaling,
         is_causal=is_causal,
+        heavy_budget_ratio=heavy_budget_ratio,
+        recent_budget_ratio=recent_budget_ratio,
     )
     
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -402,21 +406,17 @@ def sdpa_attention_forward(
     return attn_output, None
 
 
-ALL_ATTENTION_FUNCTIONS: Dict[str, Dict[str, Callable]] = {}
-
-ALL_ATTENTION_FUNCTIONS.update(
-    {
-        "flash_attention_2": flash_attention_forward,
-        "flex_attention": flex_attention_forward,
-        "sdpa": sdpa_attention_forward,
-    }
-)
-
+# 更新全局注意力函数字典
+ALL_ATTENTION_FUNCTIONS: Dict[str, Callable] = {
+    "flash_attention_2": flash_attention_forward,
+    "flex_attention": flex_attention_forward,
+    "sdpa": sdpa_attention_forward,
+}
 
 class SparseLlamaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper with H2O sparse attention"""
+    """Multi-headed attention with optional sparse attention mechanisms."""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    def __init__(self, config: LlamaConfig, layer_idx: int, heavy_budget_ratio=0.6, recent_budget_ratio=0.6):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -425,11 +425,12 @@ class SparseLlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
+        
+        # 稀疏注意力参数
+        self.heavy_budget_ratio = heavy_budget_ratio
+        self.recent_budget_ratio = recent_budget_ratio
 
-        # H2O 参数
-        self.heavy_budget_ratio = self.config.heavy_budget_ratio  # 重击者预算比例
-        self.recent_budget_ratio = self.config.recent_budget_ratio  # 最近关注预算比例
-
+        # 投影层
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
         )
@@ -447,37 +448,39 @@ class SparseLlamaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[FlashAttentionKwargs],
+        output_attentions: bool = False,
+        **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
+        # 投影
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
+        # 应用旋转位置编码
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # 处理KV缓存
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        # 直接使用内置的进行计算
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-                logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-                )
+        # 选择注意力计算接口
+        attention_interface = eager_attention_forward
+        if hasattr(self.config, "_attn_implementation") and self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and output_attentions:
+                # 警告，仅在实际需要时添加
+                pass
             else:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        # 计算注意力权重
+        # 计算注意力输出
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -486,28 +489,33 @@ class SparseLlamaAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            heavy_budget_ratio = self.heavy_budget_ratio
-            recent_budget_ratio = self.recent_budget_ratio
+            is_causal=self.is_causal,
             **kwargs,
         )
+        
+        # 重塑输出和应用输出投影
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        
         return attn_output, attn_weights
+    
 
-# 定义替换函数
-def replace_attention_with_layer_index(model,heavy_hitter_ratio=0.6,recent_ratio=0.6):
+def replace_attention_with_layer_index(model, heavy_hitter_ratio=0.6, recent_ratio=0.6):
     from transformers.models.llama.modeling_llama import LlamaAttention
+    
     # 遍历模型的所有层
     for layer_idx, layer in enumerate(model.model.layers):
         if hasattr(layer, 'self_attn') and isinstance(layer.self_attn, LlamaAttention):
-            # 创建自定义注意力层并传入层号
-            layer.self_attn.config.heavy_budget_ratio = heavy_hitter_ratio
-            layer.self_attn.config.recent_budget_ratio = recent_ratio
-            custom_attn = SparseLlamaAttention(layer.self_attn.config, layer_idx=layer_idx)
+            # 创建自定义注意力层并传入层号和稀疏性参数
+            custom_attn = SparseLlamaAttention(
+                layer.self_attn.config, 
+                layer_idx=layer_idx,
+                heavy_budget_ratio=heavy_hitter_ratio,
+                recent_budget_ratio=recent_ratio
+            )
             custom_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
-            # 替换原始注意力层
             layer.self_attn = custom_attn
-            print(f"Replaced attention in layer {layer_idx}")
+            print(f"Replaced attention in layer {layer_idx} with SparQ Attention (heavy_ratio={heavy_hitter_ratio}, recent_ratio={recent_ratio})")
 
 def _get_stopping_criteria(stop_words, tokenizer, batch_size):
     from transformers import StoppingCriteria, StoppingCriteriaList
@@ -638,7 +646,7 @@ def _set_model_kwargs_torch_dtype(model_kwargs):
 
 @MODELS.register_module()
 class H2OLlamaAttentionConvert_1(BaseModel):
-    """Model wrapper for HuggingFace models designed for chat.
+    """Model wrapper for     HuggingFace models designed for chat.
 
     Args:
         mode (str, optional): The method of input truncation when input length
@@ -662,6 +670,7 @@ class H2OLlamaAttentionConvert_1(BaseModel):
                  stop_words: Optional[str] = [],
                  mode: str = 'none',
                  **other_kwargs):
+        
 
         self.logger = get_logger()
         self.path = path
@@ -681,6 +690,8 @@ class H2OLlamaAttentionConvert_1(BaseModel):
         for k, v in other_kwargs.items():
             if v is not None:
                 self.logger.warning(f'Unused argument {k}={v}')
+
+        self.other_kwargs = other_kwargs
 
     def _load_tokenizer(self, path: Optional[str], kwargs: dict, pad_token_id: Optional[int] = None):
         from transformers import AutoTokenizer, GenerationConfig
@@ -725,22 +736,24 @@ class H2OLlamaAttentionConvert_1(BaseModel):
 
 
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
-        # =================== 对推理进行监视 ===================
-        # 初始化监控器并注册钩子
-        from .profile_utils.timing_utils import global_monitor
-       
-        global_monitor.register_hooks(self.model)
-
-        print(self.model)
-        # =================== 在这里将注意力层替换为自定义的注意力层 ===================
-        replace_attention_with_layer_index(self.model,self.heavy_ratio,self.recent_ratio)
+        # =================== SparQ ===================
+        replace_attention_with_layer_index(model = self.model)
         self.model = self.model.half().cuda()
-        print(self.model)
-        print(self.model.config.torch_dtype)  # 输出: torch.float16
-        # =================== 替换snapkv ===============================  
-        # from snapkv.monkeypatch.monkeypatch import replace_mistral,replace_llama
-        # replace_llama() 
-  
+        # =================== SparQ ===============================  
+
+
+
+
+        # =================== 对推理进行监视 ===================
+        from opencompass.models.profile_utils.timing_utils import global_monitor
+        if not hasattr(global_monitor, '_hooks_registered'):
+            global_monitor.register_hooks(self.model)
+            global_monitor._hooks_registered = True
+        # =================== 对推理进行监视 ===================
+
+
+
+
         if peft_path is not None:
             from peft import PeftModel
             peft_kwargs['is_trainable'] = False
