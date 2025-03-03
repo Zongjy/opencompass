@@ -708,9 +708,14 @@ class H2OLlamaAttentionConvert_1(BaseModel):
         # =================== 在这里将注意力层替换为自定义的注意力层 ===================
         self.heavy_ratio = 0.6
         self.recent_ratio = 0.6
+<<<<<<< HEAD:opencompass/models/sparse_attention/h2o.py
         replace_attention_with_layer_index(model = self.model, heavy_hitter_ratio = self.heavy_ratio,recent_ratio = self.recent_ratio)
         print(self.model)
         self.model = self.model.half().cuda()
+=======
+        # replace_attention_with_layer_index(model = self.model, heavy_hitter_ratio = self.heavy_ratio,recent_ratio = self.recent_ratio)
+        # self.model = self.model.half().cuda()
+>>>>>>> origin/feat/h2o:opencompass/models/h2o.py
         # =================== 替换snapkv ===============================  
         # from snapkv.monkeypatch.monkeypatch import replace_mistral,replace_llama
         # replace_llama() 
