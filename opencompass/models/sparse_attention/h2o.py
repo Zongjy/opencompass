@@ -25,7 +25,6 @@ from transformers import Cache
 import pdb
 from torch import nn
 import torch.utils.checkpoint
-from transformers.models.llama.modeling_llama import FlashAttentionKwargs
 import torch.nn.functional as F
 from typing_extensions import Unpack
 # from transformers.models.llama.configuration_llama import LlamaConfig
@@ -389,6 +388,9 @@ ALL_ATTENTION_FUNCTIONS.update(
         "sdpa": sdpa_attention_forward,
     }
 )
+from typing import Dict, Any, TypeVar, Optional, Union
+# 定义缺失的类型
+FlashAttentionKwargs = Dict[str, Any]
 
 class SparseLlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper with H2O sparse attention"""

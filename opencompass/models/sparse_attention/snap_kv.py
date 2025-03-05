@@ -1,17 +1,32 @@
 # flake8: noqa
 # yapf: disable
 from typing import Dict, List, Optional, Union
-
+import inspect
 import torch
 from mmengine.device import is_npu_available
-
+import transformers
 from opencompass.models.base import BaseModel, LMTemplateParser
 from opencompass.models.base_api import APITemplateParser
 from opencompass.registry import MODELS
 from opencompass.utils.logging import get_logger
 from opencompass.utils.prompt import PromptList
-
+# 修改为
+from transformers.cache_utils import (
+    Cache,
+    DynamicCache,
+    EncoderDecoderCache,
+    OffloadedCache,
+    QuantizedCacheConfig,
+    StaticCache,
+)
 PromptType = Union[PromptList, str]
+import logging
+import importlib.machinery
+import importlib.metadata
+import importlib.util
+import json
+import os
+logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
@@ -25,7 +40,6 @@ from transformers import Cache
 import pdb
 from torch import nn
 import torch.utils.checkpoint
-from transformers.models.llama.modeling_llama import FlashAttentionKwargs
 import torch.nn.functional as F
 from typing_extensions import Unpack
 # from transformers.models.llama.configuration_llama import LlamaConfig
@@ -41,481 +55,21 @@ import types
 from typing import Callable, List, Optional, Tuple, Union
 from transformers import LlamaConfig
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+from .monkeypatch import replace_llama,replace_mistral
 
-
-def _make_causal_mask(
-    bsz: int, tgt_len: int, past_key_values_length: int, dtype: torch.dtype, device: torch.device):
-    """
-    Make causal mask used for bi-directional self-attention.
-    """
-    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
-    mask_cond = torch.arange(mask.size(-1), device=device)
-    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-    mask = mask.to(dtype)
-
-    if past_key_values_length > 0:
-        mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-    return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
-
-
-
-def apply_rotary_pos_emb_single(x, cos, sin, position_ids):
-    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
-    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
-    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-    x_embed = (x * cos) + (rotate_half(x) * sin)
-    return x_embed
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
-):
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-
-
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
-    # print("=====================================eager_attention_forward")
-
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float16).to(query.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = torch.matmul(attn_weights, value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, attn_weights
-
-
-def flash_attention_forward(
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    dropout: float = 0.0,
-    scaling: Optional[float] = None,
-    sliding_window: Optional[int] = None,
-    softcap: Optional[float] = None,
-    **kwargs,
-) -> Tuple[torch.Tensor, None]:
-    # This is before the transpose
-    seq_len = query.shape[2]
-
-    # FA2 uses non-transposed inputs
-    query = query.transpose(1, 2)
-    key = key.transpose(1, 2)
-    value = value.transpose(1, 2)
-
-    # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-    # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in the correct dtype just to be sure everything works as expected.
-    # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-    # in fp32. (usually our RMSNorm modules handle it correctly)
-    target_dtype = None
-    if query.dtype == torch.float32:
-        if torch.is_autocast_enabled():
-            target_dtype = torch.get_autocast_gpu_dtype()
-        # Handle the case where the model is quantized
-        elif hasattr(module.config, "_pre_quantization_dtype"):
-            target_dtype = module.config._pre_quantization_dtype
-        else:
-            target_dtype = next(layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)).weight.dtype
-
-    # FA2 always relies on the value set in the module, so remove it if present in kwargs to avoid passing it twice
-    kwargs.pop("is_causal", None)
-
-    attn_output = _flash_attention_forward(
-        query,
-        key,
-        value,
-        attention_mask,
-        query_length=seq_len,
-        is_causal=module.is_causal,
-        dropout=dropout,
-        softmax_scale=scaling,
-        sliding_window=sliding_window,
-        softcap=softcap,
-        use_top_left_mask=_use_top_left_mask,
-        target_dtype=target_dtype,
-        **kwargs,
-    )
-
-    return attn_output, None
-
-def flex_attention_forward(
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: Optional[float] = None,
-    softcap: Optional[float] = None,
-    head_mask: Optional[torch.Tensor] = None,
-    **kwargs,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    causal_mask = attention_mask
-    if causal_mask is not None:
-        causal_mask = causal_mask[:, :, :, : key.shape[-2]]
-
-    def causal_mod(score, b, h, q_idx, kv_idx):
-        if softcap is not None:
-            score = softcap * torch.tanh(score / softcap)
-        if causal_mask is not None:
-            score = score + causal_mask[b][0][q_idx][kv_idx]
-        if head_mask is not None:
-            score = score + head_mask[b][h][0][0]
-        return score
-
-    attn_output, attention_weights = flex_attention(
-        query,
-        key,
-        value,
-        score_mod=causal_mod,
-        enable_gqa=True,
-        scale=scaling,
-        # Last time checked on PyTorch == 2.5.1: Flex Attention always computes the lse regardless.
-        # For simplification, we thus always return it as no additional computations are introduced.
-        return_lse=True,
-    )
-    # lse is returned in float32
-    attention_weights = attention_weights.to(value.dtype)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, attention_weights
-
-# 添加SparQ Attention所需函数
-def gather(t, dim, i):
-    """Gather values along an axis specified by dim."""
-    dim += (dim < 0) * t.ndim
-    return t.gather(dim, i.expand(*t.shape[:dim], i.shape[dim], *t.shape[dim + 1:]))
-
-def attn(Q, K, V, M):
-    """Standard attention calculation."""
-    s = (Q @ K.transpose(-1, -2)) / math.sqrt(Q.shape[-1]) + M
-    y = torch.softmax(s, dim=-1) @ V
-    return y
-
-def sparq_attn(Q, K, V, V_mean, M, r, k):
-    # 1. Approximate attention scores using r largest components of Q
-    i1 = torch.topk(torch.abs(Q).sum(dim=2, keepdim=True), r, -1).indices
-    Q_hat, K_hat = gather(Q, -1, i1), gather(K, -1, i1)
-    scale = torch.sqrt(
-        Q.shape[-1] * torch.abs(Q_hat).sum(dim=-1, keepdim=True) / 
-        torch.abs(Q).sum(dim=-1, keepdim=True)
-    )
-    
-    s_hat = torch.softmax(Q_hat @ K_hat.transpose(-1, -2) / scale + M, dim=-1)
-    
-    # 2. Gather top k positions based on approximate attention scores & run attention
-    i2 = torch.topk(s_hat.sum(dim=2, keepdim=True), k, -1).indices
-    iKV = i2[..., 0, :, None]
-    K_selected = gather(K, -2, iKV)
-    V_selected = gather(V, -2, iKV)
-    M_selected = gather(M, -1, i2)
-    
-    y_ = attn(Q, K_selected, V_selected, M_selected)
-    
-    # 3. Estimate the total score of the top k, and interpolate with V_mean
-    alpha = gather(s_hat, -1, i2).sum(-1, keepdim=True)
-    y = alpha * y_ + (1 - alpha) * V_mean
-    
-    return y
-
-def pure_scaled_dot_product_attention(
-    query: torch.Tensor, 
-    key: torch.Tensor, 
-    value: torch.Tensor, 
-    attn_mask: Optional[torch.Tensor] = None, 
-    dropout_p: float = 0.0, 
-    scale: Optional[float] = None,
-    is_causal: bool = False,
-    heavy_budget_ratio: float = 0.6,
-    recent_budget_ratio: float = 0.6,
-) -> torch.Tensor:
-
-    batch_size, num_heads, seq_len_q, head_dim = query.shape
-    _, _, seq_len_k, _ = key.shape
-    
-    if scale is None:
-        scale = 1.0 / math.sqrt(head_dim)
-    
-    # 检查是否需要应用稀疏注意力
-    if seq_len_k > 1024 and heavy_budget_ratio < 1.0:  # 对长序列应用稀疏注意力
-        # 准备掩码``
-        if attn_mask is None and is_causal:
-            causal_mask = torch.triu(
-                torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
-                diagonal=1
-            )
-            attn_mask = torch.full(
-                (seq_len_q, seq_len_k), 
-                float('-inf'), 
-                device=query.device
-            )
-            attn_mask.masked_fill_(~causal_mask, 0)
-        
-        # 计算要选择的token数量
-        heavy_budget = int(heavy_budget_ratio * seq_len_k)
-        recent_budget = min(int(recent_budget_ratio * seq_len_k), seq_len_k)
-        
-        # 保证至少有一些heavy hitters和recent tokens
-        heavy_budget = max(32, heavy_budget)
-        recent_budget = max(32, recent_budget)
-        
-        # SparQ算法参数
-        r = min(head_dim, 16)  # 用于近似的维度数量
-        k = heavy_budget      # 要选择的top-k位置
-        
-        # 计算均值作为插值基准
-        V_mean = value.mean(dim=2, keepdim=True)
-        
-        # 应用SparQ注意力
-        attn_output = sparq_attn(
-            query, 
-            key, 
-            value, 
-            V_mean, 
-            attn_mask if attn_mask is not None else 0, 
-            r, 
-            k
-        )
-    else:
-        # 标准注意力计算
-        attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
-        
-        if is_causal:
-            causal_mask = torch.triu(
-                torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
-                diagonal=1
-            )
-            attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
-        
-        if attn_mask is not None:
-            if attn_mask.dtype == torch.bool:
-                attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
-            else:
-                attn_scores = attn_scores + attn_mask
-
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        
-        if dropout_p > 0.0:
-            attn_weights = F.dropout(attn_weights, p=dropout_p)
-        
-        attn_output = torch.matmul(attn_weights, value)
-    
-    return attn_output
-
-def sdpa_attention_forward(
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    dropout: float = 0.0,
-    scaling: Optional[float] = None,
-    is_causal: Optional[bool] = None,
-    **kwargs,
-) -> Tuple[torch.Tensor, None]:
-    """Forward pass for scaled dot product attention with optional sparse attention."""
-    if hasattr(module, "num_key_value_groups"):
-        key = repeat_kv(key, module.num_key_value_groups)
-        value = repeat_kv(value, module.num_key_value_groups)
-
-    causal_mask = attention_mask
-    if attention_mask is not None:
-        causal_mask = causal_mask[:, :, :, : key.shape[-2]]
-
-    # Ensure contiguous tensors for SDPA
-    query = query.contiguous()
-    key = key.contiguous()
-    value = value.contiguous()
-
-    # Determine if causal attention should be used
-    if is_causal is None:
-        is_causal = causal_mask is None and query.shape[2] > 1
-
-    # Handle JIT tracing
-    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
-        is_causal = is_causal.item()
-
-    # 获取稀疏性参数
-    heavy_budget_ratio = getattr(module, "heavy_budget_ratio", 0.6)
-    recent_budget_ratio = getattr(module, "recent_budget_ratio", 0.6)
-
-    # 使用纯PyTorch实现的scaled_dot_product_attention，支持稀疏注意力
-    attn_output = pure_scaled_dot_product_attention(
-        query,
-        key,
-        value,
-        attn_mask=causal_mask,
-        dropout_p=dropout,
-        scale=scaling,
-        is_causal=is_causal,
-        heavy_budget_ratio=heavy_budget_ratio,
-        recent_budget_ratio=recent_budget_ratio,
-    )
-    
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, None
-
-
-# 更新全局注意力函数字典
-ALL_ATTENTION_FUNCTIONS: Dict[str, Callable] = {
-    "flash_attention_2": flash_attention_forward,
-    "flex_attention": flex_attention_forward,
-    "sdpa": sdpa_attention_forward,
-}
-
-class SparseLlamaAttention(nn.Module):
-    """Multi-headed attention with optional sparse attention mechanisms."""
-
-    def __init__(self, config: LlamaConfig, layer_idx: int, heavy_budget_ratio=0.6, recent_budget_ratio=0.6):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
-        
-        # 稀疏注意力参数
-        self.heavy_budget_ratio = heavy_budget_ratio
-        self.recent_budget_ratio = recent_budget_ratio
-
-        # 投影层
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        output_attentions: bool = False,
-        **kwargs
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        # 投影
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        # 应用旋转位置编码
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        # 处理KV缓存
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        # 选择注意力计算接口
-        attention_interface = eager_attention_forward
-        if hasattr(self.config, "_attn_implementation") and self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and output_attentions:
-                # 警告，仅在实际需要时添加
-                pass
-            else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
-        # 计算注意力输出
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            is_causal=self.is_causal,
-            **kwargs,
-        )
-        
-        # 重塑输出和应用输出投影
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        
-        return attn_output, attn_weights
-    
-
-def replace_attention_with_layer_index(model, heavy_hitter_ratio=0.6, recent_ratio=0.6):
-    from transformers.models.llama.modeling_llama import LlamaAttention
-    
+# 定义替换函数
+def replace_attention_with_layer_index():
+    replace_llama('h2o')
+    # replace_llama()
     # 遍历模型的所有层
-    for layer_idx, layer in enumerate(model.model.layers):
-        if hasattr(layer, 'self_attn') and isinstance(layer.self_attn, LlamaAttention):
-            # 创建自定义注意力层并传入层号和稀疏性参数
-            custom_attn = SparseLlamaAttention(
-                layer.self_attn.config, 
-                layer_idx=layer_idx,
-                heavy_budget_ratio=heavy_hitter_ratio,
-                recent_budget_ratio=recent_ratio
-            )
-            custom_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
-            layer.self_attn = custom_attn
-            print(f"Replaced attention in layer {layer_idx} with SparQ Attention (heavy_ratio={heavy_hitter_ratio}, recent_ratio={recent_ratio})")
+    # for layer_idx, layer in enumerate(model.model.layers):
+    #     if hasattr(layer, 'self_attn') and isinstance(layer.self_attn, LlamaAttention):
+    #         custom_attn = SparseLlamaAttention(layer.self_attn.config, layer_idx=layer_idx)
+    #         custom_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
+    #         # 替换原始注意力层
+    #         layer.self_attn = custom_attn
+    #         print(f"Replaced attention in layer {layer_idx}")
+    
 
 def _get_stopping_criteria(stop_words, tokenizer, batch_size):
     from transformers import StoppingCriteria, StoppingCriteriaList
@@ -645,14 +199,7 @@ def _set_model_kwargs_torch_dtype(model_kwargs):
 
 
 @MODELS.register_module()
-class H2OLlamaAttentionConvert_1(BaseModel):
-    """Model wrapper for     HuggingFace models designed for chat.
-
-    Args:
-        mode (str, optional): The method of input truncation when input length
-            exceeds max_seq_len. 'mid' represents the part of input to
-            truncate. Defaults to 'none'.
-    """
+class SnapKVLlamaAttentionConvert_1(BaseModel):
 
     def __init__(self,
                  path: str,
@@ -735,14 +282,11 @@ class H2OLlamaAttentionConvert_1(BaseModel):
             model_kwargs['device_map'] = 'npu'
 
 
+        # =================== 替换snapkv ===================
+        replace_attention_with_layer_index()
+        # =================== 替换snapkv ===============================  
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
-        # =================== SparQ ===================
-        replace_attention_with_layer_index(model = self.model)
-        self.model = self.model.half().cuda()
-        # =================== SparQ ===============================  
-
-
-
+        print(self.model)
 
         # =================== 对推理进行监视 ===================
         from opencompass.models.profile_utils.timing_utils import global_monitor
@@ -750,7 +294,7 @@ class H2OLlamaAttentionConvert_1(BaseModel):
             global_monitor.register_hooks(self.model)
             global_monitor._hooks_registered = True
         # =================== 对推理进行监视 ===================
-
+        # print(self.model)
 
 
 

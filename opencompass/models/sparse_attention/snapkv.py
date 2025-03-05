@@ -10,7 +10,8 @@ from opencompass.models.base_api import APITemplateParser
 from opencompass.registry import MODELS
 from opencompass.utils.logging import get_logger
 from opencompass.utils.prompt import PromptList
-# 修改为
+from typing import Dict, Any, TypeVar, Optional, Union
+FlashAttentionKwargs = Dict[str, Any]
 from transformers.cache_utils import (
     Cache,
     DynamicCache,
@@ -40,7 +41,6 @@ from transformers import Cache
 import pdb
 from torch import nn
 import torch.utils.checkpoint
-from transformers.models.llama.modeling_llama import FlashAttentionKwargs
 import torch.nn.functional as F
 from typing_extensions import Unpack
 # from transformers.models.llama.configuration_llama import LlamaConfig
@@ -714,20 +714,19 @@ class SnapKVCluster():
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
 
-
 def init_snapkv(self):
     if not hasattr(self, "kv_cluster"):
         print("=== SnapKV 初始化开始 ===")
         
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 2
+            self.config.window_size = 64
             print(f"设置默认 window_size: {self.config.window_size}")
         else:
             print(f"使用已有 window_size: {self.config.window_size}")
             
         if not hasattr(self.config, 'max_capacity_prompt'):
             # 默认是 2048
-            self.config.max_capacity_prompt = 8
+            self.config.max_capacity_prompt = 512
             print(f"设置默认 max_capacity_prompt: {self.config.max_capacity_prompt}")
         else:
             print(f"使用已有 max_capacity_prompt: {self.config.max_capacity_prompt}")
@@ -1026,9 +1025,6 @@ def forward1(
 
     # print(f"===== End of Layer: {self.layer_idx} =====\n")
     return attn_output, attn_weights
-
-
-
 
 from importlib.metadata import version
 import warnings
