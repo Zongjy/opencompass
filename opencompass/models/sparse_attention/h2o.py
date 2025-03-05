@@ -13,37 +13,35 @@ from opencompass.utils.prompt import PromptList
 
 PromptType = Union[PromptList, str]
 
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-from opencompass.models import BaseModel
-from opencompass.utils import get_logger
-import torch.nn.functional as F
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 import math
-from typing import Optional, Tuple
-from transformers import Cache
 import pdb
-from torch import nn
-import torch.utils.checkpoint
-import torch.nn.functional as F
-from typing_extensions import Unpack
-# from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
-    rotate_half,
-    apply_rotary_pos_emb,
-    LlamaRotaryEmbedding,
-    apply_rotary_pos_emb,
-    LlamaForCausalLM,
-)
 import types
 from typing import Callable, List, Optional, Tuple, Union
-from transformers import LlamaConfig
+
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+from torch import nn
+from transformers import (AutoModelForCausalLM, AutoTokenizer, Cache,
+                          GenerationConfig, LlamaConfig)
+# from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import (LlamaAttention,
+                                                      LlamaForCausalLM,
+                                                      LlamaRotaryEmbedding,
+                                                      apply_rotary_pos_emb,
+                                                      rotate_half)
+from typing_extensions import Unpack
+
+from opencompass.models import BaseModel
+from opencompass.utils import get_logger
+
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """This is the equivalent of torch.repeat_interleave(x, dim=1,
+    repeats=n_rep).
+
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim)
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
@@ -54,9 +52,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 def _make_causal_mask(
     bsz: int, tgt_len: int, past_key_values_length: int, dtype: torch.dtype, device: torch.device):
-    """
-    Make causal mask used for bi-directional self-attention.
-    """
+    """Make causal mask used for bi-directional self-attention."""
     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
@@ -161,13 +157,13 @@ def flash_attention_forward(
         if torch.is_autocast_enabled():
             target_dtype = torch.get_autocast_gpu_dtype()
         # Handle the case where the model is quantized
-        elif hasattr(module.config, "_pre_quantization_dtype"):
+        elif hasattr(module.config, '_pre_quantization_dtype'):
             target_dtype = module.config._pre_quantization_dtype
         else:
             target_dtype = next(layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)).weight.dtype
 
     # FA2 always relies on the value set in the module, so remove it if present in kwargs to avoid passing it twice
-    kwargs.pop("is_causal", None)
+    kwargs.pop('is_causal', None)
 
     attn_output = _flash_attention_forward(
         query,
@@ -235,60 +231,60 @@ def apply_h2o_attention_mask(
 ) -> torch.Tensor:
     if attn_scores is None:
         return attn_scores
-        
+
     # 计算预算
     heavy_budget = int(heavy_budget_ratio * attn_scores.shape[-1])
     recent_budget = int(recent_budget_ratio * attn_scores.shape[-1])
-    
+
     # Heavy Hitter Mask (基于全局统计)
     tmp_attn = nn.functional.softmax(attn_scores, dim=-1, dtype=torch.float16).to(attn_scores.dtype)
     tmp_sum = torch.sum(tmp_attn, dim=-2)
     _, tmp_topk = tmp_sum.topk(k=heavy_budget, dim=-1)
-    
+
     zeros = torch.zeros_like(tmp_sum, dtype=torch.bool)
     mask_bottom = zeros.scatter(-1, tmp_topk, True).unsqueeze(2)
     mask_bottom = mask_bottom.expand(mask_bottom.shape[0], mask_bottom.shape[1], attn_scores.shape[-2], mask_bottom.shape[-1])
-    
+
     ones = torch.ones_like(attn_scores, dtype=torch.bool)
     ones = torch.triu(ones, diagonal=recent_budget)  # 前 recent_budget
     ones = torch.tril(ones, diagonal=-recent_budget)  # 后 recent_budget
     mask_bottom = torch.logical_or(mask_bottom, ones)
-    
+
     # 将非重击者和非最近关注区域的权重设为负无穷
     masked_scores = attn_scores.clone()
     masked_scores[~mask_bottom] = torch.finfo(attn_scores.dtype).min
-    
+
     return masked_scores
 
 def pure_scaled_dot_product_attention(
     heavy_budget_ratio: float,
     recent_budget_ratio: float,
-    query: torch.Tensor, 
-    key: torch.Tensor, 
-    value: torch.Tensor, 
-    attn_mask: Optional[torch.Tensor] = None, 
-    dropout_p: float = 0.0, 
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
     scale: Optional[float] = None,
     is_causal: bool = False,
 ) -> torch.Tensor:
 
     batch_size, num_heads, seq_len_q, head_dim = query.shape
     _, _, seq_len_k, _ = key.shape
-    
-   
+
+
     if scale is None:
         scale = 1.0 / math.sqrt(head_dim)
-    
+
     attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale
-    
+
     if is_causal:
         causal_mask = torch.triu(
             torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
             diagonal=1
         )
         attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
-    
-    
+
+
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
             attn_scores = attn_scores.masked_fill(~attn_mask, float('-inf'))
@@ -297,19 +293,19 @@ def pure_scaled_dot_product_attention(
 
     # ============================================ h2o ============================================
     attn_scores = apply_h2o_attention_mask(
-        attn_scores, 
-        heavy_budget_ratio, 
+        attn_scores,
+        heavy_budget_ratio,
         recent_budget_ratio
     )
-    # ============================================ h2o ============================================    
+    # ============================================ h2o ============================================
 
     attn_weights = F.softmax(attn_scores, dim=-1)
-    
+
     if dropout_p > 0.0:
         attn_weights = F.dropout(attn_weights, p=dropout_p)
-    
+
     attn_output = torch.matmul(attn_weights, value)
-    
+
     return attn_output
 
 
@@ -326,8 +322,8 @@ def sdpa_attention_forward(
     recent_budget_ratio: float = 0.0,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
-    # print("=====================================sdpa_attention_forward")  
-    if hasattr(module, "num_key_value_groups"):
+    # print("=====================================sdpa_attention_forward")
+    if hasattr(module, 'num_key_value_groups'):
         key = repeat_kv(key, module.num_key_value_groups)
         value = repeat_kv(value, module.num_key_value_groups)
 
@@ -373,7 +369,7 @@ def sdpa_attention_forward(
         scale=scaling,
         is_causal=is_causal,
     )
-    
+
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, None
@@ -383,23 +379,25 @@ ALL_ATTENTION_FUNCTIONS: Dict[str, Dict[str, Callable]] = {}
 
 ALL_ATTENTION_FUNCTIONS.update(
     {
-        "flash_attention_2": flash_attention_forward,
-        "flex_attention": flex_attention_forward,
-        "sdpa": sdpa_attention_forward,
+        'flash_attention_2': flash_attention_forward,
+        'flex_attention': flex_attention_forward,
+        'sdpa': sdpa_attention_forward,
     }
 )
-from typing import Dict, Any, TypeVar, Optional, Union
+from typing import Any, Dict, Optional, TypeVar, Union
+
 # 定义缺失的类型
 FlashAttentionKwargs = Dict[str, Any]
 
 class SparseLlamaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper with H2O sparse attention"""
+    """Multi-headed attention from 'Attention Is All You Need' paper with H2O
+    sparse attention."""
 
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.head_dim = getattr(config, 'head_dim', config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
@@ -442,15 +440,15 @@ class SparseLlamaAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {'sin': sin, 'cos': cos, 'cache_position': cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # 直接使用内置的进行计算
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+        if self.config._attn_implementation != 'eager':
+            if self.config._attn_implementation == 'sdpa' and kwargs.get('output_attentions', False):
                 logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    '`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to '
                     'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
                 )
             else:
@@ -476,6 +474,7 @@ class SparseLlamaAttention(nn.Module):
 # 定义替换函数
 def replace_attention_with_layer_index(model, heavy_hitter_ratio=0.6,recent_ratio=0.6):
     from transformers.models.llama.modeling_llama import LlamaAttention
+
     # 遍历模型的所有层
     for layer_idx, layer in enumerate(model.model.layers):
         if hasattr(layer, 'self_attn') and isinstance(layer.self_attn, LlamaAttention):
@@ -486,7 +485,7 @@ def replace_attention_with_layer_index(model, heavy_hitter_ratio=0.6,recent_rati
             custom_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
             # 替换原始注意力层
             layer.self_attn = custom_attn
-            print(f"Replaced attention in layer {layer_idx}")
+            print(f'Replaced attention in layer {layer_idx}')
 
 def _get_stopping_criteria(stop_words, tokenizer, batch_size):
     from transformers import StoppingCriteria, StoppingCriteriaList
@@ -641,7 +640,7 @@ class H2OLlamaAttentionConvert_1(BaseModel):
                  stop_words: Optional[str] = [],
                  mode: str = 'none',
                  **other_kwargs):
-        
+
 
         self.logger = get_logger()
         self.path = path
@@ -710,22 +709,18 @@ class H2OLlamaAttentionConvert_1(BaseModel):
         # =================== 在这里将注意力层替换为自定义的注意力层 ===================
         self.heavy_ratio = 0.6
         self.recent_ratio = 0.6
-<<<<<<< HEAD:opencompass/models/sparse_attention/h2o.py
         replace_attention_with_layer_index(model = self.model, heavy_hitter_ratio = self.heavy_ratio,recent_ratio = self.recent_ratio)
         print(self.model)
         self.model = self.model.half().cuda()
-=======
-        # replace_attention_with_layer_index(model = self.model, heavy_hitter_ratio = self.heavy_ratio,recent_ratio = self.recent_ratio)
-        # self.model = self.model.half().cuda()
->>>>>>> origin/feat/h2o:opencompass/models/h2o.py
-        # =================== 替换snapkv ===============================  
+        # =================== 替换snapkv ===============================
         # from snapkv.monkeypatch.monkeypatch import replace_mistral,replace_llama
-        # replace_llama() 
+        # replace_llama()
 
 
 
         # =================== 对推理进行监视 ===================
-        from opencompass.models.profile_utils.timing_utils import global_monitor
+        from opencompass.models.profile_utils.timing_utils import \
+            global_monitor
         if not hasattr(global_monitor, '_hooks_registered'):
             global_monitor.register_hooks(self.model)
             global_monitor._hooks_registered = True
@@ -979,7 +974,7 @@ class H2OLlamaAttentionConvert_1(BaseModel):
 
         # step-2: conduct model forward to generate output
         outputs = self.model.generate(**tokens, **generation_kwargs)
-        
+
         outputs = outputs[:, tokens['input_ids'].shape[1]:]
 
         # step-3: decode the output
