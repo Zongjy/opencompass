@@ -83,7 +83,6 @@ def _flash_attention_forward(
 
     return attn_output
 
-
 def llama_attn_forward_PyramidKV(
     self,
     hidden_states: torch.Tensor,

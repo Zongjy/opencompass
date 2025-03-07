@@ -563,6 +563,18 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
         t = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, return_dict=True)
         return len(t['input_ids'])
 
+    def clear_model_cache(self):
+        if hasattr(self.model, 'past_key_values'):
+            print("===============")
+            self.model.past_key_values = None
+        for layer in self.model.model.layers:
+            print("===============")
+            if hasattr(layer.self_attn, 'kv_seq_len'):
+                layer.self_attn.kv_seq_len = 0
+
+        print("===============")
+        torch.cuda.empty_cache()
+
 def  _convert_base_messages(inputs):
     outputs = []
     for _input in inputs:

@@ -154,6 +154,8 @@ class GenInferencer(BaseInferencer):
                     entry, max_out_len=self.max_out_len, **extra_gen_kwargs)
                 generated = results
 
+                self.model.clear_model_cache()
+
             num_return_sequences = getattr(self.model, 'generation_kwargs',
                                            {}).get('num_return_sequences', 1)
             # 5-3. Save current output
@@ -175,14 +177,16 @@ class GenInferencer(BaseInferencer):
                                              'tmp_' + output_json_filename)
             num_sample += len(datum)
 
+            
+
         end_time_stamp = time.time()
 
         #  =========================输出推理时间=========================
         from opencompass.models.profile_utils.timing_utils import global_monitor
         global_monitor.report()
-        global_monitor.save_report(f'./{output_json_filename}model_monitor_report.json')
+        global_monitor.save_report(f'./outputs/{output_json_filename}model_monitor_report.json')
         from opencompass.models.profile_utils.timing_utils import token_counter
-        token_counter.save_to_file(f'./{output_json_filename}token.json')
+        token_counter.save_to_file(f'./outputs/{output_json_filename}token.json')
         #  =========================输出推理时间=========================
 
         # 6. Output
