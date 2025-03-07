@@ -3,7 +3,6 @@ from mmengine.config import read_base
 with read_base():
     from .datasets.commonsenseqa.commonsenseqa_gen_b57518 import commonsenseqa_datasets  # noqa: F401, F403
     from .datasets.gsm8k.gsm8k_gen import gsm8k_datasets  # 修改变量名以匹配数据集
-    from .datasets.longbench.longbenchgov_report.longbench_gov_report_gen import LongBench_gov_report_datasets
     from .datasets.longbench.longbenchmulti_news.longbench_multi_news_gen import LongBench_multi_news_datasets
     from .datasets.longbench.longbenchmultifieldqa_en.longbench_multifieldqa_en_gen import LongBench_multifieldqa_en_datasets
     from .datasets.longbench.longbenchvcsum.longbench_vcsum_gen import LongBench_vcsum_datasets
