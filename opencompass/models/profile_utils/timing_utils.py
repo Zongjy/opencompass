@@ -2,6 +2,7 @@ import time
 import torch
 import numpy as np
 from collections import defaultdict
+import sys
 
 class ModelMonitor:
     def __init__(self, print_per_forward=False):
@@ -27,7 +28,15 @@ class ModelMonitor:
         # 样本处理时间
         self.sample_processing_times = []
         
-        # 新增: prefill 和 decode 阶段监控 (保留数据收集但删除报告输出)
+        # 输入token统计
+        self.input_token_stats = {
+            "samples": [],  # 每个样本的输入token数
+            "prefill_tokens": [],  # prefill阶段的token数
+            "decode_tokens": [],  # decode阶段的token数
+            "total_tokens": 0,  # 所有token总数
+        }
+        
+        # prefill 和 decode 阶段监控
         self.prefill_stats = {
             "total_time": 0,
             "call_count": 0,
@@ -55,7 +64,7 @@ class ModelMonitor:
         self._attention_start_time = None
         self._max_out_len = 100  # 默认值，应当设置为实际max_out_len
         
-        # 新增: 注意力层内部组件统计
+        # 注意力层内部组件统计
         self.attention_component_stats = {
             "total_attention_time": 0,
             "components": defaultdict(lambda: {"total_time": 0, "call_count": 0})
@@ -63,21 +72,20 @@ class ModelMonitor:
         self._current_attention_component = None
         self._component_start_time = None
         
-        # 新增: 注意力层合并统计
+        # 注意力层合并统计
         self.attention_layer_stats = {
             "total_time": 0,
             "call_count": 0,
             "layers": defaultdict(lambda: {"total_time": 0, "call_count": 0})
         }
         
-        # 新增: 注意力计算统计
+        # 注意力计算统计
         self.attention_compute_stats = {
             "total_time": 0,
             "call_count": 0
         }
         self._in_attention_compute = False
         self._attention_compute_start_time = None
-    
     def register_hooks(self, model):
         """为模型和其子模块注册监控钩子"""
         # 检查模型是否支持钩子
@@ -102,8 +110,7 @@ class ModelMonitor:
                             comp_module.register_forward_hook(
                                 lambda m, i, o, comp=comp_name: self.attention_component_end_hook(m, i, o, comp))
                     
-                    # 新增: 添加注意力计算的钩子 - 需要找到计算注意力的具体方法或函数
-                    # 这里假设SparseLlamaAttention中有一个compute_attention方法
+                    # 添加注意力计算的钩子
                     if hasattr(module, 'compute_attention'):
                         original_compute_attention = module.compute_attention
                         
@@ -138,9 +145,6 @@ class ModelMonitor:
                     module.register_forward_pre_hook(self.module_start_hook)
                     module.register_forward_hook(self.module_end_hook)
     
-        # 标记钩子已注册
-        self._hooks_registered = True
-    
     def global_start_hook(self, module, input):
         """全局开始计时钩子"""
         torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -153,28 +157,38 @@ class ModelMonitor:
             
             # 计算tokens
             batch_size, seq_len = input_ids.shape[:2]
-            self.global_stats["total_tokens"] += batch_size * seq_len
+            current_tokens = batch_size * seq_len
+            self.global_stats["total_tokens"] += current_tokens
             self.global_stats["total_samples"] += batch_size
             
+            # 统计输入token
+            self.input_token_stats["total_tokens"] += current_tokens
+            
             # 判断当前阶段 (prefill 或 decode)
-            # 通常prefill阶段输入序列较长，decode阶段输入为1个token
             is_prefill = seq_len > 1
             
-            # 更新当前状态
-            self.current_phase = "prefill" if is_prefill else "decode"
-            
-            # 如果是新的prefill阶段，开始一个新样本
             if is_prefill:
+                self.input_token_stats["prefill_tokens"].append(current_tokens)
+                # 新样本开始
                 self.current_sample_id = id(input_ids)
                 self.current_sample_start_time = time.time()
                 self.current_sample_attention_time = 0
                 self.current_sample_decode_times = []
+                # 初始化样本token计数
+                self.input_token_stats["samples"].append({"prefill": current_tokens, "decode": 0})
+            else:
+                self.input_token_stats["decode_tokens"].append(current_tokens)
+                # 更新当前样本的decode token计数
+                if self.input_token_stats["samples"]:
+                    self.input_token_stats["samples"][-1]["decode"] += current_tokens
+            
+            # 更新当前状态
+            self.current_phase = "prefill" if is_prefill else "decode"
             
             # 只在需要时打印
             if self.print_per_forward:
                 phase = "Prefill" if is_prefill else "Decode"
-                print(f"[{phase}] 输入shape: {input_ids.shape}, tokens: {batch_size * seq_len}")
-    
+                print(f"[{phase}] 输入shape: {input_ids.shape}, tokens: {current_tokens}")
     def global_end_hook(self, module, input, output):
         """全局结束计时钩子"""
         torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -294,7 +308,6 @@ class ModelMonitor:
         self._in_attention_layer = False
         
         return output
-    
     def attention_component_start_hook(self, module, input, component_name):
         """SparseLlamaAttention内部组件开始计时钩子"""
         if not self._in_attention_layer:
@@ -339,8 +352,8 @@ class ModelMonitor:
         
         return output
     
-    # 设置最大输出长度（用于检测样本是否处理完成）
     def set_max_out_len(self, max_out_len):
+        """设置最大输出长度"""
         self._max_out_len = max_out_len
     
     def report(self):
@@ -362,19 +375,33 @@ class ModelMonitor:
             print(f"处理token总数: {self.global_stats['total_tokens']}")
             print(f"吞吐量: {tokens_per_sec:.2f} tokens/秒")
             
-            # 新增: 平均每条数据推理时间
             if len(self.sample_processing_times) > 0:
                 avg_sample_time = np.mean(self.sample_processing_times)
                 print(f"平均每条数据推理时间: {avg_sample_time:.2f}毫秒 ({avg_sample_time/1000:.2f}秒)")
         
-        # 删除Prefill阶段统计
-        # 删除Decode阶段统计
+        # 输入token统计
+        print("\n----- 输入Token统计 -----")
+        print(f"总Token数: {self.input_token_stats['total_tokens']}")
+        
+        if self.input_token_stats["prefill_tokens"]:
+            avg_prefill = sum(self.input_token_stats["prefill_tokens"]) / len(self.input_token_stats["prefill_tokens"])
+            print(f"Prefill阶段平均Token数: {avg_prefill:.2f}")
+            print(f"Prefill阶段Token数分布: {self.input_token_stats['prefill_tokens']}")
+        
+        if self.input_token_stats["decode_tokens"]:
+            avg_decode = sum(self.input_token_stats["decode_tokens"]) / len(self.input_token_stats["decode_tokens"])
+            print(f"Decode阶段平均Token数: {avg_decode:.2f}")
+        
+        print("\n每个样本的Token统计:")
+        for i, sample in enumerate(self.input_token_stats["samples"]):
+            print(f"样本 {i+1}: Prefill tokens={sample['prefill']}, "
+                  f"Decode tokens={sample['decode']}, "
+                  f"总计={sample['prefill'] + sample['decode']}")
         
         # 整体样本处理统计
         if self.prefill_stats["sample_times"] and self.decode_stats["samples_total_time"]:
             print("\n----- 整体样本处理性能 -----")
             
-            # 计算整体处理时间
             if len(self.sample_processing_times) > 0:
                 total_times = np.array(self.sample_processing_times)
                 avg_total_time = np.mean(total_times)
@@ -389,7 +416,6 @@ class ModelMonitor:
                 print(f"Prefill阶段占比: {prefill_ratio:.1f}%")
                 print(f"Decode阶段占比: {decode_ratio:.1f}%")
                 
-                # 新增: 整体每条数据token吞吐量
                 avg_tokens_per_sample = len(self.decode_stats['token_times'])/len(self.decode_stats["samples_total_time"]) if len(self.decode_stats["samples_total_time"]) > 0 else 0
                 end_to_end_tokens_per_second = (avg_tokens_per_sample * 1000) / avg_total_time if avg_total_time > 0 else 0
                 print(f"端到端每秒token吞吐量: {end_to_end_tokens_per_second:.2f} tokens/秒")
@@ -400,7 +426,6 @@ class ModelMonitor:
                               key=lambda x: x[1]["total_time"], 
                               reverse=True)
         
-        # 分类统计模块信息
         attention_layers = []
         other_modules = []
         
@@ -410,8 +435,7 @@ class ModelMonitor:
             else:
                 other_modules.append((module_name, stats))
         
-        # 打印非注意力层的模块统计
-        for module_name, stats in other_modules[:20]:  # 只显示前20个耗时最长的非注意力模块
+        for module_name, stats in other_modules[:20]:
             avg_time = stats["total_time"] / stats["call_count"] if stats["call_count"] > 0 else 0
             time_percent = (stats["total_time"] / total_time * 100) if total_time > 0 else 0
             
@@ -420,7 +444,6 @@ class ModelMonitor:
                   f"平均 {avg_time:.2f}ms/次, "
                   f"占比 {time_percent:.1f}%")
         
-        # 打印注意力层的合并统计
         if attention_layers:
             print("\n----- SparseLlamaAttention 总体性能 -----")
             total_attention_time = self.attention_layer_stats["total_time"]
@@ -433,7 +456,6 @@ class ModelMonitor:
                   f"平均 {attention_avg_time:.2f}ms/次, "
                   f"占比 {attention_percent:.1f}%")
         
-        # 新增: SparseLlamaAttention内部组件统计
         if self.attention_component_stats["total_attention_time"] > 0:
             print("\n----- SparseLlamaAttention内部组件性能 -----")
             total_attn_time = self.attention_component_stats["total_attention_time"]
@@ -457,18 +479,6 @@ class ModelMonitor:
                       f"调用 {comp_calls}次, "
                       f"占注意力层时间 {comp_percent_of_attn:.1f}%, "
                       f"占全局时间 {comp_percent_of_total:.1f}%")
-                
-            # 新增: 添加注意力计算占用时间百分比
-            if self.attention_compute_stats["call_count"] > 0:
-                compute_time = self.attention_compute_stats["total_time"]
-                compute_calls = self.attention_compute_stats["call_count"]
-                compute_percent_of_attn = (compute_time / total_attn_time * 100) if total_attn_time > 0 else 0
-                compute_percent_of_total = (compute_time / total_time * 100) if total_time > 0 else 0
-                
-                print(f"compute_attention: 总计 {compute_time:.2f}ms, "
-                      f"调用 {compute_calls}次, "
-                      f"占注意力层时间 {compute_percent_of_attn:.1f}%, "
-                      f"占全局时间 {compute_percent_of_total:.1f}%")
         
         # 输入输出统计
         print("\n----- 输入/输出统计 -----")
@@ -497,6 +507,14 @@ class ModelMonitor:
         
         # 重置样本处理时间
         self.sample_processing_times = []
+        
+        # 重置token统计
+        self.input_token_stats = {
+            "samples": [],
+            "prefill_tokens": [],
+            "decode_tokens": [],
+            "total_tokens": 0,
+        }
         
         # 重置prefill和decode统计
         self.prefill_stats = {
@@ -550,5 +568,144 @@ class ModelMonitor:
         
         print("已重置所有监控统计信息")
 
+    def save_report(self, filepath):
+        import json
+    
+        # 构建JSON数据结构
+        report_data = {
+            "basic_metrics": {
+                "total_inference_count": self.global_stats["call_count"],
+                "total_inference_time_ms": round(self.global_stats["total_time"], 2),
+                "total_inference_time_s": round(self.global_stats["total_time"]/1000, 2),
+                "total_samples": self.global_stats['total_samples'],
+                "total_tokens": self.global_stats['total_tokens']
+            },
+        
+        
+            "sample_statistics": [
+                {
+                    "sample_id": i+1,
+                    "prefill_tokens": sample['prefill'],
+                    "decode_tokens": sample['decode'],
+                    "total_tokens": sample['prefill'] + sample['decode']
+                }
+                for i, sample in enumerate(self.input_token_stats["samples"])
+            ],
+        
+            "performance_statistics": {},
+        
+            "module_statistics": {
+                module_name: {
+                    "total_time_ms": round(stats["total_time"], 2),
+                    "call_count": stats["call_count"],
+                    "avg_time_ms": round(stats["total_time"] / stats["call_count"], 2) if stats["call_count"] > 0 else 0,
+                    "time_percentage": round((stats["total_time"] / self.global_stats["total_time"] * 100), 1) if self.global_stats["total_time"] > 0 else 0
+                }
+                for module_name, stats in sorted(self.module_stats.items(), 
+                                              key=lambda x: x[1]["total_time"], 
+                                              reverse=True)
+            },
+        
+            "attention_statistics": {
+                "total_time_ms": round(self.attention_component_stats["total_attention_time"], 2),
+                "time_percentage": round((self.attention_component_stats["total_attention_time"] / self.global_stats["total_time"] * 100), 1) if self.global_stats["total_time"] > 0 else 0,
+                "components": {
+                    comp_name: {
+                        "total_time_ms": round(stats["total_time"], 2),
+                        "call_count": stats["call_count"],
+                        "percentage_of_attention": round((stats["total_time"] / self.attention_component_stats["total_attention_time"] * 100), 1) if self.attention_component_stats["total_attention_time"] > 0 else 0,
+                        "percentage_of_total": round((stats["total_time"] / self.global_stats["total_time"] * 100), 1) if self.global_stats["total_time"] > 0 else 0
+                    }
+                    for comp_name, stats in self.attention_component_stats["components"].items()
+                }
+            },
+        
+            "shape_statistics": {
+                "recent_input_shapes": self.input_shapes[-5:] if self.input_shapes else None,
+                "recent_output_shapes": self.output_shapes[-5:] if self.output_shapes else None,
+                "all_input_shapes": self.input_shapes,
+                "all_output_shapes": self.output_shapes
+            },
+        
+            "raw_data": {
+                "prefill_tokens": self.input_token_stats['prefill_tokens'],
+                "decode_tokens": self.input_token_stats['decode_tokens'],
+                "prefill_times_ms": self.prefill_stats['sample_times'],
+                "decode_token_times_ms": self.decode_stats['token_times'],
+                "sample_total_times_ms": self.sample_processing_times
+            }
+        }
+    
+        # 如果有处理性能统计数据，添加到report_data中
+        if self.prefill_stats["sample_times"] and self.decode_stats["samples_total_time"] and len(self.sample_processing_times) > 0:
+            total_times = np.array(self.sample_processing_times)
+            avg_total_time = np.mean(total_times)
+            prefill_avg = np.mean(self.prefill_stats["sample_times"])
+            decode_avg = np.mean(self.decode_stats["samples_total_time"])
+        
+            report_data["performance_statistics"] = {
+                "avg_sample_process_time_ms": round(avg_total_time, 2),
+                "avg_sample_process_time_s": round(avg_total_time/1000, 2),
+                "prefill_phase_ratio": round((prefill_avg / (prefill_avg + decode_avg)) * 100, 1),
+                "decode_phase_ratio": round((decode_avg / (prefill_avg + decode_avg)) * 100, 1)
+            }
+    
+        # 保存为JSON文件
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, ensure_ascii=False, indent=2)
+    
+        print(f"监控报告已保存到: {filepath}")
+        
+  
+
 # 全局监控器实例
 global_monitor = ModelMonitor(print_per_forward=False)
+
+
+import json
+from datetime import datetime
+import os
+
+class TokenCounter:
+    def __init__(self):
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.history = []  # 用于记录每次的token使用情况
+    
+    def update(self, input_count, output_count):
+        self.total_input_tokens += input_count
+        self.total_output_tokens += output_count
+        
+        # 记录本次使用情况
+        self.history.append({
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "input_tokens": input_count,
+            "output_tokens": output_count
+        })
+    
+    def get_totals(self):
+        return {
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens
+        }
+    
+    def save_to_file(self, filepath="token_usage_stats.json"):
+        # 准备要保存的数据
+        data = {
+            "summary": self.get_totals(),
+            "history": self.history,
+            "save_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
+        
+        # 保存到文件
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        
+        print(f"Token usage statistics saved to {filepath}")
+
+# 创建全局计数器实例
+token_counter = TokenCounter()

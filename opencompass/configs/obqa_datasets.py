@@ -1,11 +1,15 @@
 from mmengine.config import read_base
 
 with read_base():
-    from .datasets.commonsenseqa.commonsenseqa_gen_1da2d0 import commonsenseqa_datasets  # noqa: F401, F403
+    from .datasets.commonsenseqa.commonsenseqa_gen_b57518 import commonsenseqa_datasets  # noqa: F401, F403
     from .datasets.gsm8k.gsm8k_gen import gsm8k_datasets  # 修改变量名以匹配数据集
+    from .datasets.longbench.longbenchgov_report.longbench_gov_report_gen import LongBench_gov_report_datasets
+    from .datasets.longbench.longbenchmulti_news.longbench_multi_news_gen import LongBench_multi_news_datasets
+    from .datasets.longbench.longbenchmultifieldqa_en.longbench_multifieldqa_en_gen import LongBench_multifieldqa_en_datasets
+    from .datasets.longbench.longbenchvcsum.longbench_vcsum_gen import LongBench_vcsum_datasets
 
 # 将需要评测的数据集拼接成 datasets 字段
-datasets = [*gsm8k_datasets]  # 使用更贴切的变量名
+datasets = [*commonsenseqa_datasets]  # 使用更贴切的变量名
 
 from opencompass.models.sparse_attention.snap_kv import SnapKVLlamaAttentionConvert_1
 from opencompass.models.sparse_attention.h2o import H2OLlamaAttentionConvert_1

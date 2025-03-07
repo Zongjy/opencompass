@@ -176,9 +176,13 @@ class GenInferencer(BaseInferencer):
             num_sample += len(datum)
 
         end_time_stamp = time.time()
+
         #  =========================输出推理时间=========================
         from opencompass.models.profile_utils.timing_utils import global_monitor
         global_monitor.report()
+        global_monitor.save_report("./model_monitor_report.json")
+        from opencompass.models.profile_utils.timing_utils import token_counter
+        token_counter.save_to_file("./token.json")
         #  =========================输出推理时间=========================
 
         # 6. Output

@@ -1098,9 +1098,9 @@ def init_CAM(self):
 def init_H2O(self):
     if not hasattr(self, "kv_cluster"):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 2
+            self.config.window_size = 8
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 8
+            self.config.max_capacity_prompt = 2048
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):

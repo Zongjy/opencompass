@@ -287,6 +287,8 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
         # =================== 替换snapkv ===============================  
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
         print(self.model)
+        print("Model kwargs:")
+        print(model_kwargs)
 
         # =================== 对推理进行监视 ===================
         from opencompass.models.profile_utils.timing_utils import global_monitor
@@ -544,6 +546,13 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
         # step-2: conduct model forward to generate output
         outputs = self.model.generate(**tokens, **generation_kwargs)
         
+        #===========  计算输入token数量 =========================
+        from opencompass.models.profile_utils.timing_utils import token_counter
+        input_count = len(tokens["input_ids"][0])
+        output_count = len(outputs[0])
+        token_counter.update(input_count, output_count)
+        #===========  计算输入token数量 =========================
+
         outputs = outputs[:, tokens['input_ids'].shape[1]:]
 
         # step-3: decode the output
