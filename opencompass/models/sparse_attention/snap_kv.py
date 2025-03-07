@@ -1,61 +1,56 @@
 # flake8: noqa
 # yapf: disable
-from typing import Dict, List, Optional, Union
 import inspect
+from typing import Dict, List, Optional, Union
+
 import torch
-from mmengine.device import is_npu_available
 import transformers
+from mmengine.device import is_npu_available
+# 修改为
+from transformers.cache_utils import (Cache, DynamicCache, EncoderDecoderCache,
+                                      OffloadedCache, QuantizedCacheConfig,
+                                      StaticCache)
+
 from opencompass.models.base import BaseModel, LMTemplateParser
 from opencompass.models.base_api import APITemplateParser
 from opencompass.registry import MODELS
 from opencompass.utils.logging import get_logger
 from opencompass.utils.prompt import PromptList
-# 修改为
-from transformers.cache_utils import (
-    Cache,
-    DynamicCache,
-    EncoderDecoderCache,
-    OffloadedCache,
-    QuantizedCacheConfig,
-    StaticCache,
-)
+
 PromptType = Union[PromptList, str]
-import logging
 import importlib.machinery
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
+
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
-from opencompass.models import BaseModel
-from opencompass.utils import get_logger
-import torch.nn.functional as F
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 import math
-from typing import Optional, Tuple
-from transformers import Cache
 import pdb
-from torch import nn
-import torch.utils.checkpoint
-import torch.nn.functional as F
-from typing_extensions import Unpack
-# from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
-    rotate_half,
-    apply_rotary_pos_emb,
-    LlamaRotaryEmbedding,
-    apply_rotary_pos_emb,
-    LlamaForCausalLM,
-)
 import types
 from typing import Callable, List, Optional, Tuple, Union
-from transformers import LlamaConfig
 
-from .monkeypatch import replace_llama,replace_mistral
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+from torch import nn
+from transformers import (AutoModelForCausalLM, AutoTokenizer, Cache,
+                          GenerationConfig, LlamaConfig)
+# from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import (LlamaAttention,
+                                                      LlamaForCausalLM,
+                                                      LlamaRotaryEmbedding,
+                                                      apply_rotary_pos_emb,
+                                                      rotate_half)
+from typing_extensions import Unpack
+
+from opencompass.models import BaseModel
+from opencompass.utils import get_logger
+
+from .monkeypatch import replace_llama, replace_mistral
+
 
 # 定义替换函数
 def replace_attention_with_layer_index():
@@ -69,7 +64,7 @@ def replace_attention_with_layer_index():
     #         # 替换原始注意力层
     #         layer.self_attn = custom_attn
     #         print(f"Replaced attention in layer {layer_idx}")
-    
+
 
 def _get_stopping_criteria(stop_words, tokenizer, batch_size):
     from transformers import StoppingCriteria, StoppingCriteriaList
@@ -217,7 +212,7 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
                  stop_words: Optional[str] = [],
                  mode: str = 'none',
                  **other_kwargs):
-        
+
 
         self.logger = get_logger()
         self.path = path
@@ -284,14 +279,15 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
 
         # =================== 替换snapkv ===================
         replace_attention_with_layer_index()
-        # =================== 替换snapkv ===============================  
+        # =================== 替换snapkv ===============================
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
         print(self.model)
-        print("Model kwargs:")
+        print('Model kwargs:')
         print(model_kwargs)
 
         # =================== 对推理进行监视 ===================
-        from opencompass.models.profile_utils.timing_utils import global_monitor
+        from opencompass.models.profile_utils.timing_utils import \
+            global_monitor
         if not hasattr(global_monitor, '_hooks_registered'):
             global_monitor.register_hooks(self.model)
             global_monitor._hooks_registered = True
@@ -545,10 +541,10 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
 
         # step-2: conduct model forward to generate output
         outputs = self.model.generate(**tokens, **generation_kwargs)
-        
+
         #===========  计算输入token数量 =========================
         from opencompass.models.profile_utils.timing_utils import token_counter
-        input_count = len(tokens["input_ids"][0])
+        input_count = len(tokens['input_ids'][0])
         output_count = len(outputs[0])
         token_counter.update(input_count, output_count)
         #===========  计算输入token数量 =========================
