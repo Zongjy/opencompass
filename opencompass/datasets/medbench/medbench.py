@@ -16,7 +16,7 @@ from nltk.translate.bleu_score import sentence_bleu
 # # from bert_score import score
 import re
 from transformers import BasicTokenizer
-from rouge_chinese import Rouge
+from rouge import Rouge
 basic_tokenizer = BasicTokenizer(tokenize_chinese_chars=True)
 
 @LOAD_DATASET.register_module()

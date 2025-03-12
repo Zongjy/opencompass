@@ -8,7 +8,7 @@ with read_base():
     from .datasets.longbench.longbenchvcsum.longbench_vcsum_gen import LongBench_vcsum_datasets
 
 # 将需要评测的数据集拼接成 datasets 字段
-datasets = [*commonsenseqa_datasets]  # 使用更贴切的变量名
+datasets = [*gsm8k_datasets]  # 使用更贴切的变量名
 
 from opencompass.models.sparse_attention.snap_kv import SnapKVLlamaAttentionConvert_1
 from opencompass.models.sparse_attention.h2o import H2OLlamaAttentionConvert_1

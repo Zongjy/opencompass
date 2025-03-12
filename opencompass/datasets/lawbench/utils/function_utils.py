@@ -1,4 +1,4 @@
-from rouge_chinese import Rouge
+from rouge import Rouge
 import jieba
 from nltk.translate.gleu_score import corpus_gleu
 

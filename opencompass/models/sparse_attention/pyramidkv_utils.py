@@ -290,7 +290,7 @@ class PyramidKVCluster():
         max_capacity_prompt = max_num - self.layer_idx * steps
 
         print(f'PyramidKV max_capacity_prompt {max_capacity_prompt}')
-        print(f'PyramidKV max_capacity_prompt {self.layer_idx}')
+        print(f'PyramidKV layer_idx {self.layer_idx}')
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         elif q_len < (self.max_capacity_prompt - self.window_size) * 2:
@@ -1159,8 +1159,9 @@ class HeadKVCluster():
         attn_weights = nn.functional.softmax(attn_weights,
                                              dim=-1,
                                              dtype=torch.float32).to(
-                                             query_states.dtype)
-        attn_weights_mean = attn_weights[:, :, -self.window_size:, :-self.window_size].mean(dim=-2)
+                                                 query_states.dtype)
+        attn_weights_mean = attn_weights[:, :, -self.window_size:, :-self.
+                                         window_size].mean(dim=-2)
         if self.pooling == 'avgpool':
             attn_weights_mean_pooling = F.avg_pool1d(
                 attn_weights_mean,
@@ -1458,9 +1459,9 @@ class SparQCluster():
 def init_pyramidkv(self, num_hidden_layers):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 32
+            self.config.window_size = 16
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 2048
+            self.config.max_capacity_prompt = 128
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1591,7 +1592,7 @@ def init_StreamingLLM(self):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 32
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 2048
+            self.config.max_capacity_prompt = 512
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):

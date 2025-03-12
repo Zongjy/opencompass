@@ -54,7 +54,7 @@ from .monkeypatch import replace_llama, replace_mistral
 
 # 定义替换函数
 def replace_attention_with_layer_index():
-    replace_llama('h2o')
+    replace_llama('streamingllm')
     # replace_llama()
     # 遍历模型的所有层
     # for layer_idx, layer in enumerate(model.model.layers):
@@ -565,14 +565,10 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
 
     def clear_model_cache(self):
         if hasattr(self.model, 'past_key_values'):
-            print("===============")
             self.model.past_key_values = None
         for layer in self.model.model.layers:
-            print("===============")
             if hasattr(layer.self_attn, 'kv_seq_len'):
                 layer.self_attn.kv_seq_len = 0
-
-        print("===============")
         torch.cuda.empty_cache()
 
 def  _convert_base_messages(inputs):
