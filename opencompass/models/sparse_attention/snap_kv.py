@@ -54,7 +54,7 @@ from .monkeypatch import replace_llama, replace_mistral
 
 # 定义替换函数
 def replace_attention_with_layer_index():
-    replace_llama('streamingllm')
+    replace_llama('adakv')
     # replace_llama()
     # 遍历模型的所有层
     # for layer_idx, layer in enumerate(model.model.layers):

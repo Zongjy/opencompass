@@ -91,9 +91,9 @@ def replace_llama(method, model_name=None):
 
     elif method == 'headkv':
         print('Using HeadKV!')
-        transformers.models.llama.modeling_llama.LlamaModel.forward = adaptive_LlamaModel_forward
-        transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_flash_attn2_forward_HeadKV
-        transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_HeadKV
+        # transformers.models.llama.modeling_llama.LlamaModel.forward = adaptive_LlamaModel_forward
+        # transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_flash_attn2_forward_HeadKV
+        # transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_HeadKV
         transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_flash_attn2_forward_HeadKV
 
     elif method == 'think':

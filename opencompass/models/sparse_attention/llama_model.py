@@ -53,11 +53,11 @@ def _flash_attention_forward(self,
         softmax_scale (`float`, *optional*):
             The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
     """
-    if not self._flash_attn_uses_top_left_mask:
-        causal = self.is_causal
-    else:
-        # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in LlamaFlashAttention2 __init__.
-        causal = self.is_causal and query_length != 1
+    # if not self._flash_attn_uses_top_left_mask:
+    #     causal = self.is_causal
+    # else:
+    # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in LlamaFlashAttention2 __init__.
+    causal = self.is_causal and query_length != 1
 
     # Contains at least one padding token in the sequence
     if attention_mask is not None:

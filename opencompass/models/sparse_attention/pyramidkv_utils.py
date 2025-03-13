@@ -1590,9 +1590,9 @@ def init_H2O(self):
 def init_StreamingLLM(self):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 32
+            self.config.window_size = 16
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 512
+            self.config.max_capacity_prompt = 256
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1614,7 +1614,7 @@ def init_adakv(self):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 32
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 2048
+            self.config.max_capacity_prompt = 512
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1633,7 +1633,7 @@ def init_adakv(self):
             max_capacity_prompt=self.config.max_capacity_prompt,
             kernel_size=self.config.kernel_size,
             pooling=self.config.pooling,
-            floor=self.config.floor,
+            floor=0.2,
             normalize=self.config.normalize)
 
 
