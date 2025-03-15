@@ -20,8 +20,8 @@ from .huggingface import HuggingFaceChatGLM3  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFaceBaseModel  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFacewithChatTemplate  # noqa: F401
 from .sparse_attention.h2o import H2OLlamaAttentionConvert_1
-from .sparse_attention.snapkv import SnapKVLlamaAttentionConvert_1
 from .sparse_attention.snap_kv import SnapKVLlamaAttentionConvert_1
+from .sparse_attention.infllm_model import INFLLM_LlamaForCausalLM
 from .hunyuan_api import Hunyuan  # noqa: F401
 from .intern_model import InternLM  # noqa: F401
 from .interntrain import InternTrain  # noqa: F401
@@ -52,3 +52,4 @@ from .yayi_api import Yayi  # noqa: F401
 from .yi_api import YiAPI  # noqa: F401
 from .zhipuai_api import ZhiPuAI  # noqa: F401
 from .zhipuai_v2_api import ZhiPuV2AI  # noqa: F401
+

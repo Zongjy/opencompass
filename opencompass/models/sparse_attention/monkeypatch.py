@@ -1,7 +1,8 @@
 from importlib.metadata import version
 
 import transformers
-
+import torch
+import os
 from .llama_model import (
     adaptive_LlamaModel_forward, llama_attn_forward_cake,
     llama_attn_forward_CAM, llama_attn_forward_H2O, llama_attn_forward_L2Norm,
@@ -35,7 +36,7 @@ from .mistral_model import (
     prepare_inputs_for_generation_mistral_new)
 
 
-def replace_llama(method, model_name=None):
+def replace_llama(method, model_name="meta-llama/Meta-Llama-3.1-8B-Instruct"):
 
     if method == 'pyramidkv':
         print('Using PyramidKV!')
@@ -72,8 +73,8 @@ def replace_llama(method, model_name=None):
         from .minference import init_minference, minference_attn_forward
         init_minference(model_name)
         transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_llama_new
-        transformers.models.llama.modeling_llama.LlamaAttention.forward = minference_attn_forward
-        transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = minference_attn_forward
+        # transformers.models.llama.modeling_llama.LlamaAttention.forward = minference_attn_forward
+        # transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = minference_attn_forward
         transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = minference_attn_forward
 
     elif method == 'l2norm':
@@ -115,6 +116,36 @@ def replace_llama(method, model_name=None):
         print('Using cake!')
         transformers.models.llama.modeling_llama.LlamaModel.forward = llama_model_forward_cake
         transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_attn_forward_cake
+        transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_attn_forward_cake
+
+
+    elif method == 'infllm':
+        print('Using infllm!')
+
+    elif method == 'arkvale':
+        print('Using arkvale!')
+        # from transformers import AutoModelForCausalLM
+        # from arkvale import adapter
+        # dev = torch.device("cuda:0")
+        # dtype = torch.float16
+
+
+        # adapter.enable_arkvale(
+        #     model_name, 
+        #     dtype=dtype, 
+        #     device=dev, 
+        #     page_size=32,
+        #     # page_budgets=None, # page_budgets=None means "full" (no eviction & recall)
+        #     page_budgets=4096 // 32,
+        #     page_topks=32,
+        #     n_max_bytes=40 * (1 << 30),
+        #     n_max_cpu_bytes=80 * (1 << 30)
+        # )
+        
+        
+
+
+
 
     if method not in ['fullkv']:
         transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_llama_new

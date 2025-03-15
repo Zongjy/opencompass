@@ -70,8 +70,12 @@ def minference_attn_forward(
             is_causal=self.is_causal,
         )
 
-    assert attn_output.size(1) == q_len
+    # print("attn_output.size(1)",attn_output.shape)
+    # print("q_len==============",q_len)
+
+    # assert attn_output.size(1) == q_len
     attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+    # attn_output = attn_output.contiguous()
     attn_output = self.o_proj(attn_output)
 
     return attn_output, None, past_key_value

@@ -154,7 +154,7 @@ class GenInferencer(BaseInferencer):
                     entry, max_out_len=self.max_out_len, **extra_gen_kwargs)
                 generated = results
 
-                self.model.clear_model_cache()
+                # self.model.clear_model_cache()
 
             num_return_sequences = getattr(self.model, 'generation_kwargs',
                                            {}).get('num_return_sequences', 1)

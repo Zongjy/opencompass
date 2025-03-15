@@ -7,8 +7,7 @@ import torch
 import transformers
 from mmengine.device import is_npu_available
 # 修改为
-from transformers.cache_utils import (Cache, DynamicCache, EncoderDecoderCache,
-                                      OffloadedCache, QuantizedCacheConfig,
+from transformers.cache_utils import (Cache, DynamicCache, 
                                       StaticCache)
 
 from opencompass.models.base import BaseModel, LMTemplateParser
@@ -53,8 +52,11 @@ from .monkeypatch import replace_llama, replace_mistral
 
 
 # 定义替换函数
-def replace_attention_with_layer_index():
-    replace_llama('adakv')
+def replace_attention_with_layer_index(method = None,model = None):
+    if method == 'infllmn':
+        model = replace_llama(method,model)
+    else:
+        replace_llama(method,model)
     # replace_llama()
     # 遍历模型的所有层
     # for layer_idx, layer in enumerate(model.model.layers):
@@ -276,11 +278,16 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
         if is_npu_available():
             model_kwargs['device_map'] = 'npu'
 
-
-        # =================== 替换snapkv ===================
-        replace_attention_with_layer_index()
-        # =================== 替换snapkv ===============================
+        # ============================================================================
+        method = 'arkvale'
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
+        if method == 'infllm':
+            model = replace_attention_with_layer_index(method)
+            self.model
+        else:
+            replace_attention_with_layer_index(method,self.model)
+        
+        
         print(self.model)
         print('Model kwargs:')
         print(model_kwargs)
