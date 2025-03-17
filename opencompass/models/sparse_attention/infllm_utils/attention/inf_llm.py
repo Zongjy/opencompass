@@ -36,7 +36,6 @@ def inf_llm_forward(
         h_k = project_k(key_value)         # (batch, len_k, num_heads * dim_head)
         h_v = project_v(key_value)         # (batch, len_k, num_heads * dim_head)
 
-
         h_q = h_q.view(batch_size, len_q, num_heads, dim_head).permute(0, 2, 1, 3).contiguous()   # (batch, num_heads, len_q, dim_head)
         h_k = h_k.view(batch_size, len_k, num_heads_kv, dim_head).permute(0, 2, 1, 3).contiguous()   # (batch, num_heads_kv, len_k, dim_head)
         h_v = h_v.view(batch_size, len_k, num_heads_kv, dim_head).permute(0, 2, 1, 3).contiguous()   # (batch, num_heads_kv, len_k, dim_head)

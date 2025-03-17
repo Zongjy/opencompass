@@ -6,7 +6,8 @@ import os
 import os.path as osp
 import time
 from typing import List, Optional
-
+import os
+from datetime import datetime
 import mmengine
 import torch
 from tqdm import tqdm
@@ -130,6 +131,8 @@ class GenInferencer(BaseInferencer):
         logger.info('Starting build dataloader')
         dataloader = self.get_dataloader(prompt_list[index:], self.batch_size)
 
+        # dataloader =[next(iter(dataloader)) for _ in range(min(1, len(dataloader)))]
+
         # 5. Inference for prompts in each batch
         logger.info('Starting inference process gen_inference ...')
 
@@ -188,7 +191,30 @@ class GenInferencer(BaseInferencer):
         from opencompass.models.profile_utils.timing_utils import token_counter
         token_counter.save_to_file(f'./outputs/{output_json_filename}token.json')
         #  =========================输出推理时间=========================
+        # ================== 打印出TTFT 和 TPFT =================================
+        if hasattr(self.model, 'global_timing_stats') and self.model.global_timing_stats['sample_count'] > 0:
+            avg_ttft = self.model.global_timing_stats['ttft_sum'] / self.model.global_timing_stats['sample_count']
+            avg_tpot = self.model.global_timing_stats['tpot_sum'] / self.model.global_timing_stats['sample_count']
+            print(f"\n=== Final Dataset Performance Metrics ===")
+            print(f"Total samples processed: {self.model.global_timing_stats['sample_count']}")
+            print(f"Average TTFT: {avg_ttft:.4f} seconds")
+            print(f"Average TPOT: {avg_tpot:.4f} seconds")
+            print(f"Total output tokens: {self.model.global_timing_stats['total_output_tokens']}")
 
+                # 创建要保存的数据
+            timing_data = {
+                "total_samples": self.model.global_timing_stats['sample_count'],
+                "avg_ttft_seconds": round(avg_ttft, 4),
+                "avg_tpot_seconds": round(avg_tpot, 4),
+                "total_input_tokens": self.model.global_timing_stats['total_input_tokens'],
+                "avg_input_tokens": round(self.model.global_timing_stats['total_input_tokens'] / self.model.global_timing_stats['sample_count'], 2),
+                "total_output_tokens": self.model.global_timing_stats['total_output_tokens'],
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            output_file = os.path.join(f"./outputs/{output_json_filename}_ttft_tpot.json")
+            with open(output_file, 'w') as f:
+                json.dump(timing_data, f, indent=4)
+            print(f"Performance metrics saved to {output_file}")
         # 6. Output
         if self.is_main_process:
             os.makedirs(output_json_filepath, exist_ok=True)

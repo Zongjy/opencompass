@@ -1612,9 +1612,9 @@ def init_StreamingLLM(self):
 def init_adakv(self):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 32
+            self.config.window_size = 16
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 512
+            self.config.max_capacity_prompt = 64
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):

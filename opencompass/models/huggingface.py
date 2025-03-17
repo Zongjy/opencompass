@@ -318,7 +318,7 @@ class HuggingFace(BaseModel):
         outputs = self.model.generate(**tokens,
                                       max_new_tokens=max_out_len,
                                       **kwargs)
-
+        
         if not self.extract_pred_after_decode:
             outputs = outputs[:, tokens['input_ids'].shape[1]:]
 
@@ -352,6 +352,18 @@ class HuggingFace(BaseModel):
         Returns:
             List[str]: A list of generated strings.
         """
+        import time
+        if not hasattr(self, 'global_timing_stats'):
+            self.global_timing_stats = {
+                'ttft_sum': 0.0,
+                'tpot_sum': 0.0,
+                'sample_count': 0,
+                'total_output_tokens': 0,
+                'total_input_tokens': 0  
+            
+            }
+
+
         if self.extract_pred_after_decode:
             prompt_lens = [len(input_) for input_ in inputs]
 
@@ -404,11 +416,93 @@ class HuggingFace(BaseModel):
         if min_out_len is not None:
             kwargs['min_new_tokens'] = min_out_len
 
+
+
+        
+        # =========== 添加时间计算的类============================
+        class TimingCallback(transformers.StoppingCriteria):
+            def __init__(self, input_length):
+                self.start_time = time.time()
+                self.first_token_time = None
+                self.token_generation_times = []
+                self.prev_token_count = input_length
+                self.input_length = input_length
+                
+            def __call__(self, input_ids, scores, **kwargs):
+                current_time = time.time()
+                current_token_count = input_ids.shape[1]
+                if self.first_token_time is None and current_token_count > self.prev_token_count:
+                    self.first_token_time = current_time - self.start_time
+                if current_token_count > self.prev_token_count:
+                    new_tokens = current_token_count - self.prev_token_count
+                    self.token_generation_times.append((current_time, new_tokens))
+                    self.prev_token_count = current_token_count
+                    
+                return False
+    
+
+        timing_callbacks = []
+        for i in range(len(input_ids)):
+            callback = TimingCallback(input_ids[i].shape[0])
+            timing_callbacks.append(callback)
+    
+   
+        if 'stopping_criteria' in kwargs:
+            for callback in timing_callbacks:
+                kwargs['stopping_criteria'].append(callback)
+        else:
+            kwargs['stopping_criteria'] = transformers.StoppingCriteriaList(timing_callbacks)
+        # =========== 添加时间计算的类============================
+
         # To accommodate the PeftModel, parameters should be passed in
         # key-value format for generate.
+
+        # 在处理输入之后，生成之前记录输入toke
+        # 在处理输入之后，生成之前记录输入token
+        total_input_tokens = sum(len(ids) for ids in input_ids)
+        self.global_timing_stats['total_input_tokens'] += total_input_tokens
+            
+        generate_start_time = time.time()
         outputs = self.model.generate(input_ids=input_ids,
                                       max_new_tokens=max_out_len,
                                       **kwargs)
+        generate_end_time = time.time()
+
+        # ==========================================================================
+        for i, callback in enumerate(timing_callbacks):
+            if callback.first_token_time is not None:
+                self.global_timing_stats['ttft_sum'] += callback.first_token_time
+                if callback.token_generation_times:
+                    total_tokens = sum(tokens for _, tokens in callback.token_generation_times)
+                    if total_tokens > 0:
+                        last_time = callback.token_generation_times[-1][0]
+                        total_generation_time = last_time - callback.start_time
+                        tpot = total_generation_time / total_tokens
+                        self.global_timing_stats['tpot_sum'] += tpot
+                        self.global_timing_stats['total_output_tokens'] += total_tokens
+            
+                self.global_timing_stats['sample_count'] += 1
+    
+        if self.global_timing_stats['sample_count'] > 0:
+            avg_ttft = self.global_timing_stats['ttft_sum'] / self.global_timing_stats['sample_count']
+        
+            if self.global_timing_stats['total_output_tokens'] > 0:
+                avg_tpot = self.global_timing_stats['tpot_sum'] / self.global_timing_stats['sample_count']
+                print(f"\n=== Dataset Performance Metrics ===")
+                print(f"Samples processed: {self.global_timing_stats['sample_count']}")
+                print(f"Average TTFT: {avg_ttft:.4f} seconds")
+                print(f"Average TPOT: {avg_tpot:.4f} seconds")
+                print(f"Total output tokens: {self.global_timing_stats['total_output_tokens']}")
+    
+        
+        #===========  计算输入token数量 =========================
+        from opencompass.models.profile_utils.timing_utils import token_counter
+        output_count = len(outputs[0])
+        input_count = 0
+        token_counter.update(input_count,output_count)
+        print("======output",output_count)
+        #===========  计算输入token数量 =========================
+
 
         if not self.extract_pred_after_decode:
             outputs = outputs[:, input_ids.shape[1]:]

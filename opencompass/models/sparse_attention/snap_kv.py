@@ -52,11 +52,8 @@ from .monkeypatch import replace_llama, replace_mistral
 
 
 # 定义替换函数
-def replace_attention_with_layer_index(method = None,model = None):
-    if method == 'infllmn':
-        model = replace_llama(method,model)
-    else:
-        replace_llama(method,model)
+def replace_attention_with_layer_index(method = None):
+    replace_llama(method)
     # replace_llama()
     # 遍历模型的所有层
     # for layer_idx, layer in enumerate(model.model.layers):
@@ -279,13 +276,10 @@ class SnapKVLlamaAttentionConvert_1(BaseModel):
             model_kwargs['device_map'] = 'npu'
 
         # ============================================================================
-        method = 'arkvale'
+        method = 'adakv'
+        replace_attention_with_layer_index(method)
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
-        if method == 'infllm':
-            model = replace_attention_with_layer_index(method)
-            self.model
-        else:
-            replace_attention_with_layer_index(method,self.model)
+        # replace_attention_with_layer_index(method)
         
         
         print(self.model)
