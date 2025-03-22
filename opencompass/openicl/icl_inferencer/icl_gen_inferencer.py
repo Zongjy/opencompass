@@ -131,7 +131,7 @@ class GenInferencer(BaseInferencer):
         logger.info('Starting build dataloader')
         dataloader = self.get_dataloader(prompt_list[index:], self.batch_size)
 
-        # dataloader =[next(iter(dataloader)) for _ in range(min(1, len(dataloader)))]
+        # dataloader =[next(iter(dataloader)) for _ in range(min(5, len(dataloader)))]
 
         # 5. Inference for prompts in each batch
         logger.info('Starting inference process gen_inference ...')
@@ -206,6 +206,7 @@ class GenInferencer(BaseInferencer):
                 "total_samples": self.model.global_timing_stats['sample_count'],
                 "avg_ttft_seconds": round(avg_ttft, 4),
                 "avg_tpot_seconds": round(avg_tpot, 4),
+                "total_inference_time":self.model.global_timing_stats['total_inference_time'],
                 "total_input_tokens": self.model.global_timing_stats['total_input_tokens'],
                 "avg_input_tokens": round(self.model.global_timing_stats['total_input_tokens'] / self.model.global_timing_stats['sample_count'], 2),
                 "total_output_tokens": self.model.global_timing_stats['total_output_tokens'],

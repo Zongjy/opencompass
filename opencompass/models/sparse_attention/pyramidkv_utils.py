@@ -1461,7 +1461,7 @@ def init_pyramidkv(self, num_hidden_layers):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 16
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 128
+            self.config.max_capacity_prompt = 64
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1483,9 +1483,9 @@ def init_pyramidkv(self, num_hidden_layers):
 def init_snapkv(self):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 4
+            self.config.window_size = 16
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 32
+            self.config.max_capacity_prompt = 256
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1507,7 +1507,7 @@ def init_think(self):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 32
         if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 4096
+            self.config.max_capacity_prompt = 2048
         if not hasattr(self.config, 'kernel_size'):
             self.config.kernel_size = 5
         if not hasattr(self.config, 'pooling'):
@@ -1568,7 +1568,7 @@ def init_CAM(self):
 def init_H2O(self):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 64
+            self.config.window_size = 32
         if not hasattr(self.config, 'max_capacity_prompt'):
             self.config.max_capacity_prompt = 2048
         if not hasattr(self.config, 'kernel_size'):
@@ -1590,7 +1590,7 @@ def init_H2O(self):
 def init_StreamingLLM(self):
     if not hasattr(self, 'kv_cluster'):
         if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 16
+            self.config.window_size = 128
         if not hasattr(self.config, 'max_capacity_prompt'):
             self.config.max_capacity_prompt = 256
         if not hasattr(self.config, 'kernel_size'):

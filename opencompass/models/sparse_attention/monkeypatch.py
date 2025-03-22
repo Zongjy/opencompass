@@ -122,6 +122,16 @@ def replace_llama(method, model_name="meta-llama/Meta-Llama-3.1-8B-Instruct"):
     elif method == 'infllm':
         print('Using infllm!')
 
+    elif method == 'quest':
+        print('Using quest!')
+
+    elif method == 'tova':
+        print('Using tova!')
+    
+    elif method == 'qfilters':
+        print('Using qfilters!')
+           
+
     elif method == 'arkvale':
         print('Using arkvale!')
         # from transformers import AutoModelForCausalLM

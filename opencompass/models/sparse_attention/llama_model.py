@@ -3,6 +3,7 @@ from tkinter import NO
 import warnings
 from typing import List, Optional, Tuple, Union
 
+from transformers.models.llama.configuration_llama import LlamaConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,13 +17,13 @@ from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
 from transformers.utils import logging
 
 from .apply_rope import triton_apply_rotary_pos_emb
-from .cake_cache import CakeCache, CakeDecodingKVCache_LayerWise
+from .cake.cake_cache import CakeCache, CakeDecodingKVCache_LayerWise
 from .flex_prefill_attention import flex_prefill_attention
 from .pyramidkv_utils import (DynamicCacheSplitHeadFlatten, init_adakv,
                               init_CAM, init_H2O, init_headkv, init_l2norm,
                               init_pyramidkv, init_snapkv, init_sparq,
                               init_StreamingLLM)
-from .utils import calculate_entropy
+from .cake.utils import calculate_entropy
 
 logger = logging.get_logger(__name__)
 
@@ -3571,8 +3572,8 @@ def llama_sdpa_attn_forward_Flexprefill(
         gamma=0.9,
         tau=0.1,
         block_size=32,
-        min_budget=128,
-        max_budget=512,
+        min_budget=64,
+        max_budget=256,
     )
 
     attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -3605,6 +3606,7 @@ def llama_attn_forward_cake(
         )
     if isinstance(past_key_value, DynamicCache):
         past_key_value = CakeCache.from_dynamic_cache(past_key_value)
+
     if self.config.decoding_evict[self.layer_idx] is None and len(
             past_key_value.layer_budget) == self.config.prefill_cake_evict[
                 self.layer_idx].num_layers:
@@ -3774,15 +3776,17 @@ def llama_attn_forward_cake(
         value_states = value_states.to(target_dtype)
 
     attn_output = _flash_attention_forward(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        q_len,
+        self = self,
+        query_states = query_states,
+        key_states = key_states,
+        value_states = value_states,
+        attention_mask = attention_mask,
+        query_length = q_len,
         dropout=dropout_rate,
-        sliding_window=getattr(self, 'sliding_window', None),
-        use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        is_causal=self.is_causal,
+        # sliding_window=getattr(self, 'sliding_window', None),
+        # use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        # is_causal=self.is_causal,
+        # dropout_rate,
     )
 
     attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()

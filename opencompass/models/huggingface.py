@@ -359,7 +359,8 @@ class HuggingFace(BaseModel):
                 'tpot_sum': 0.0,
                 'sample_count': 0,
                 'total_output_tokens': 0,
-                'total_input_tokens': 0  
+                'total_input_tokens': 0,
+                'total_inference_time': 0.0,
             
             }
 
@@ -429,6 +430,7 @@ class HuggingFace(BaseModel):
                 self.input_length = input_length
                 
             def __call__(self, input_ids, scores, **kwargs):
+                torch.cuda.synchronize()
                 current_time = time.time()
                 current_token_count = input_ids.shape[1]
                 if self.first_token_time is None and current_token_count > self.prev_token_count:
@@ -463,12 +465,16 @@ class HuggingFace(BaseModel):
         self.global_timing_stats['total_input_tokens'] += total_input_tokens
             
         generate_start_time = time.time()
+        torch.cuda.synchronize()
         outputs = self.model.generate(input_ids=input_ids,
                                       max_new_tokens=max_out_len,
+                                      past_key_values = self.past_key_values,
                                       **kwargs)
+        torch.cuda.synchronize()
         generate_end_time = time.time()
 
         # ==========================================================================
+        self.global_timing_stats['total_inference_time'] += generate_end_time - generate_start_time
         for i, callback in enumerate(timing_callbacks):
             if callback.first_token_time is not None:
                 self.global_timing_stats['ttft_sum'] += callback.first_token_time
@@ -485,13 +491,16 @@ class HuggingFace(BaseModel):
     
         if self.global_timing_stats['sample_count'] > 0:
             avg_ttft = self.global_timing_stats['ttft_sum'] / self.global_timing_stats['sample_count']
+            
         
             if self.global_timing_stats['total_output_tokens'] > 0:
                 avg_tpot = self.global_timing_stats['tpot_sum'] / self.global_timing_stats['sample_count']
+                Inference_time = generate_end_time - generate_start_time
                 print(f"\n=== Dataset Performance Metrics ===")
                 print(f"Samples processed: {self.global_timing_stats['sample_count']}")
                 print(f"Average TTFT: {avg_ttft:.4f} seconds")
                 print(f"Average TPOT: {avg_tpot:.4f} seconds")
+                print(f"Inference time : {Inference_time:.4f} seconds")
                 print(f"Total output tokens: {self.global_timing_stats['total_output_tokens']}")
     
         
