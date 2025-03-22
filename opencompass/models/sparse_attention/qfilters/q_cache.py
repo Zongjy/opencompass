@@ -1,13 +1,15 @@
-from .utils import QFilters
-from transformers.cache_utils import Cache
 from typing import Any, Dict, List, Optional, Tuple, Union
+
 import torch
 from transformers import AutoModelForCausalLM
+from transformers.cache_utils import Cache
+
+from .utils import QFilters
 
 
 class KNormCache(Cache):
-    """
-    An implementation of KNorm filtering in transformers' KV cache framework.
+    """An implementation of KNorm filtering in transformers' KV cache
+    framework.
 
     It stores the Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is
     `[batch_size, num_heads, seq_len, head_dim]`.
@@ -21,7 +23,7 @@ class KNormCache(Cache):
 
     is_sliding = False
 
-    def __init__(self, max_length:int, window_length: int) -> None:
+    def __init__(self, max_length: int, window_length: int) -> None:
         super().__init__()
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
@@ -29,7 +31,10 @@ class KNormCache(Cache):
         self.window_length = window_length
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        """Returns the sequence length of the cached states.
+
+        A layer index can be optionally passed.
+        """
         # TODO: deprecate this function in favor of `cache_position`
         # Workaround to make 'key_states.shape[-2] + past_key_value.get_seq_length(self.layer_idx)' <= window_length
         if len(self.key_cache) <= layer_idx:
@@ -37,7 +42,8 @@ class KNormCache(Cache):
         return self.key_cache[layer_idx].shape[-2]
 
     def get_max_cache_shape(self) -> Optional[int]:
-        """Returns the maximum sequence length of the cache object, in case of SinkCache it is the window length."""
+        """Returns the maximum sequence length of the cache object, in case of
+        SinkCache it is the window length."""
         return self.window_length
 
     def update(
@@ -47,8 +53,8 @@ class KNormCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+        """Updates the cache with the new `key_states` and `value_states` for
+        the layer `layer_idx`.
 
         Parameters:
             key_states (`torch.Tensor`):
@@ -73,8 +79,10 @@ class KNormCache(Cache):
 
         else:
             # Growing cache
-            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
-            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+            self.key_cache[layer_idx] = torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2)
+            self.value_cache[layer_idx] = torch.cat(
+                [self.value_cache[layer_idx], value_states], dim=-2)
 
         key_cache = self.key_cache[layer_idx]
         value_cache = self.value_cache[layer_idx]
@@ -83,13 +91,19 @@ class KNormCache(Cache):
             return key_cache, value_cache
 
         key_length = key_cache.shape[-2]
-        
 
-        comp_key, window_key = key_cache[..., :key_length-self.window_length, :], key_cache[..., key_length-self.window_length:,:]
-        comp_value, window_value = value_cache[..., :key_length-self.window_length, :], value_cache[..., key_length-self.window_length:,:]
+        comp_key, window_key = key_cache[..., :key_length -
+                                         self.window_length, :], key_cache[
+                                             ..., key_length -
+                                             self.window_length:, :]
+        comp_value, window_value = value_cache[
+            ..., :key_length -
+            self.window_length, :], value_cache[..., key_length -
+                                                self.window_length:, :]
 
         proj_key = comp_key.norm(dim=-1)
-        key_idx = (-proj_key).topk(self.max_length - self.window_length, -1).indices.sort().values
+        key_idx = (-proj_key).topk(self.max_length - self.window_length,
+                                   -1).indices.sort().values
         key_idx = key_idx[..., None].repeat(1, 1, 1, key_cache.shape[-1])
 
         comp_key = torch.gather(comp_key, -2, key_idx)
@@ -101,10 +115,8 @@ class KNormCache(Cache):
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
 
-
 class QFiltersCache(Cache):
-    """
-    An implementation of Q-Filters in transformers' KV cache framework.
+    """An implementation of Q-Filters in transformers' KV cache framework.
 
     It stores the Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is
     `[batch_size, num_heads, seq_len, head_dim]`.
@@ -118,23 +130,27 @@ class QFiltersCache(Cache):
 
     is_sliding = False
 
-    def __init__(self, model,max_length:int, window_length: int, model_name: str,**model_kwargs) -> None:
+    def __init__(self, model, max_length: int, window_length: int,
+                 model_name: str, **model_kwargs) -> None:
         super().__init__()
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
         self.max_length = max_length
         self.window_length = window_length
 
-        model_suffix = model_name.split("/")[-1]
+        model_suffix = model_name.split('/')[-1]
         self.q_filters = QFilters.from_pretrained(
-            f"nthngdy/{model_suffix}_qfilt",
+            f'nthngdy/{model_suffix}_qfilt',
             num_layers=32,
             num_kv_heads=8,
-            kv_head_dim=128 ).q_filters
+            kv_head_dim=128).q_filters
         self.q_filters = model
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        """Returns the sequence length of the cached states.
+
+        A layer index can be optionally passed.
+        """
         # TODO: deprecate this function in favor of `cache_position`
         # Workaround to make 'key_states.shape[-2] + past_key_value.get_seq_length(self.layer_idx)' <= window_length
         if len(self.key_cache) <= layer_idx:
@@ -142,7 +158,8 @@ class QFiltersCache(Cache):
         return self.key_cache[layer_idx].shape[-2]
 
     def get_max_cache_shape(self) -> Optional[int]:
-        """Returns the maximum sequence length of the cache object, in case of SinkCache it is the window length."""
+        """Returns the maximum sequence length of the cache object, in case of
+        SinkCache it is the window length."""
         return self.window_length
 
     def update(
@@ -152,8 +169,8 @@ class QFiltersCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+        """Updates the cache with the new `key_states` and `value_states` for
+        the layer `layer_idx`.
 
         Parameters:
             key_states (`torch.Tensor`):
@@ -178,24 +195,32 @@ class QFiltersCache(Cache):
 
         else:
             # Growing cache
-            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
-            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+            self.key_cache[layer_idx] = torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2)
+            self.value_cache[layer_idx] = torch.cat(
+                [self.value_cache[layer_idx], value_states], dim=-2)
 
         key_cache = self.key_cache[layer_idx]
         value_cache = self.value_cache[layer_idx]
 
         if key_cache.shape[2] < self.max_length:
             return key_cache, value_cache
-        
+
         current_filter = self.q_filters[layer_idx].to(key_cache.device)
         key_length = key_cache.shape[-2]
-        
 
-        comp_key, window_key = key_cache[..., :key_length-self.window_length, :], key_cache[..., key_length-self.window_length:,:]
-        comp_value, window_value = value_cache[..., :key_length-self.window_length, :], value_cache[..., key_length-self.window_length:,:]
+        comp_key, window_key = key_cache[..., :key_length -
+                                         self.window_length, :], key_cache[
+                                             ..., key_length -
+                                             self.window_length:, :]
+        comp_value, window_value = value_cache[
+            ..., :key_length -
+            self.window_length, :], value_cache[..., key_length -
+                                                self.window_length:, :]
 
         proj_key = (comp_key * current_filter[None, :, None]).sum(-1)
-        key_idx = (-proj_key).topk(self.max_length - self.window_length, -1).indices.sort().values
+        key_idx = (-proj_key).topk(self.max_length - self.window_length,
+                                   -1).indices.sort().values
         key_idx = key_idx[..., None].repeat(1, 1, 1, key_cache.shape[-1])
 
         comp_key = torch.gather(comp_key, -2, key_idx)

@@ -1,9 +1,8 @@
 import math
-from tkinter import NO
 import warnings
+from tkinter import NO
 from typing import List, Optional, Tuple, Union
 
-from transformers.models.llama.configuration_llama import LlamaConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,18 +11,19 @@ from flash_attn import flash_attn_func, flash_attn_varlen_func
 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       logger, repeat_kv)
 from transformers.utils import logging
 
 from .apply_rope import triton_apply_rotary_pos_emb
 from .cake.cake_cache import CakeCache, CakeDecodingKVCache_LayerWise
+from .cake.utils import calculate_entropy
 from .flex_prefill_attention import flex_prefill_attention
 from .pyramidkv_utils import (DynamicCacheSplitHeadFlatten, init_adakv,
                               init_CAM, init_H2O, init_headkv, init_l2norm,
                               init_pyramidkv, init_snapkv, init_sparq,
                               init_StreamingLLM)
-from .cake.utils import calculate_entropy
 
 logger = logging.get_logger(__name__)
 
@@ -3776,12 +3776,12 @@ def llama_attn_forward_cake(
         value_states = value_states.to(target_dtype)
 
     attn_output = _flash_attention_forward(
-        self = self,
-        query_states = query_states,
-        key_states = key_states,
-        value_states = value_states,
-        attention_mask = attention_mask,
-        query_length = q_len,
+        self=self,
+        query_states=query_states,
+        key_states=key_states,
+        value_states=value_states,
+        attention_mask=attention_mask,
+        query_length=q_len,
         dropout=dropout_rate,
         # sliding_window=getattr(self, 'sliding_window', None),
         # use_top_left_mask=self._flash_attn_uses_top_left_mask,
@@ -3922,4 +3922,3 @@ def llama_model_forward_cake(
         hidden_states=all_hidden_states,
         attentions=all_self_attns,
     )
-

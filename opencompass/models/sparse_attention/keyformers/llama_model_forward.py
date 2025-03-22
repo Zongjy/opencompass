@@ -1,9 +1,8 @@
 import math
-from tkinter import NO
 import warnings
+from tkinter import NO
 from typing import List, Optional, Tuple, Union
 
-from transformers.models.llama.configuration_llama import LlamaConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,18 +11,19 @@ from flash_attn import flash_attn_func, flash_attn_varlen_func
 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
                                                       logger, repeat_kv)
 from transformers.utils import logging
 
 from .apply_rope import triton_apply_rotary_pos_emb
 from .cake.cake_cache import CakeCache, CakeDecodingKVCache_LayerWise
+from .cake.utils import calculate_entropy
 from .flex_prefill_attention import flex_prefill_attention
 from .pyramidkv_utils import (DynamicCacheSplitHeadFlatten, init_adakv,
                               init_CAM, init_H2O, init_headkv, init_l2norm,
                               init_pyramidkv, init_snapkv, init_sparq,
                               init_StreamingLLM)
-from .cake.utils import calculate_entropy
 
 logger = logging.get_logger(__name__)
 
@@ -101,16 +101,12 @@ def _flash_attention_forward(self,
 
 
 import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional, Tuple
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+
 
 def llama_keyformer_attn_forward(
     self,
@@ -128,10 +124,10 @@ def llama_keyformer_attn_forward(
     tau_delta: float = 0.01,
     kv_cache: float = 60.0,
     recent: float = 30.0,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    """
-    支持KeyFormer的Llama注意力前向传播实现
-    
+) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+           Optional[Tuple[torch.Tensor]]]:
+    """支持KeyFormer的Llama注意力前向传播实现.
+
     额外参数:
     keyformer: 是否启用KeyFormer功能
     tau_init: Gumbel-softmax初始温度参数
@@ -172,32 +168,36 @@ def llama_keyformer_attn_forward(
     value_states = self.v_proj(hidden_states)
 
     # 重塑张量以进行多头注意力计算
-    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    query_states = query_states.view(bsz, q_len, self.num_heads,
+                                     self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads,
+                                 self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads,
+                                     self.head_dim).transpose(1, 2)
 
     kv_seq_len = key_states.shape[-1]
     if past_key_value is not None:
         if self.layer_idx is None:
-            raise ValueError(
-                f"需要初始化层索引以使用KV缓存"
-            )
+            raise ValueError(f'需要初始化层索引以使用KV缓存')
         if hasattr(self, 'kv_seq_len'):
             if self.kv_seq_len != 0:
                 kv_seq_len += self.kv_seq_len
             else:
-                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+                kv_seq_len += past_key_value.get_usable_length(
+                    kv_seq_len, self.layer_idx)
         else:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value.get_usable_length(
+                kv_seq_len, self.layer_idx)
 
     # 应用旋转位置编码
     if position_embeddings is None:
         cos, sin = self.rotary_emb(value_states, position_ids)
     else:
         cos, sin = position_embeddings
-    
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    
+
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
+                                                    cos, sin)
+
     # 处理多查询注意力
     key_states_original = key_states
     value_states_original = value_states
@@ -211,21 +211,22 @@ def llama_keyformer_attn_forward(
             'cos': cos,
             'cache_position': cache_position
         }
-        
+
         # 标准的KV缓存更新
-        key_prev, value_prev = past_key_value.get_past_keys_values(self.layer_idx)
-        
+        key_prev, value_prev = past_key_value.get_past_keys_values(
+            self.layer_idx)
+
         if key_prev is not None and value_prev is not None:
             key_states = torch.cat([key_prev, key_states], dim=2)
             value_states = torch.cat([value_prev, value_states], dim=2)
-        
+
         # 更新或设置kv_seq_len
         self.kv_seq_len = key_states.shape[2]
 
     # 创建因果掩码
     min_val = torch.finfo(query_states.dtype).min
     causal_mask = None
-    
+
     if attention_mask is not None:
         causal_mask = attention_mask[:, :, :, :key_states.shape[2]]
     elif q_len > 1:  # 自动创建因果掩码
@@ -238,12 +239,13 @@ def llama_keyformer_attn_forward(
 
     # 计算注意力分数
     attn_scale = 1.0 / math.sqrt(self.head_dim)
-    attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * attn_scale
-    
+    attn_weights = torch.matmul(query_states, key_states.transpose(
+        -2, -1)) * attn_scale
+
     # 应用掩码
     if causal_mask is not None:
         attn_weights = attn_weights.masked_fill(causal_mask, min_val)
-    
+
     # KeyFormer: Gumbel-Softmax部分
     gumbel_score = None
     if keyformer and q_len > 1:  # 在提示阶段使用标准注意力
@@ -254,24 +256,26 @@ def llama_keyformer_attn_forward(
     elif keyformer:
         # 计算当前的tau值
         current_tau = tau_init + (self.keyformer_itr_count * tau_delta)
-        
+
         # 应用Gumbel-Softmax
-        gumbel_score = F.gumbel_softmax(
-            attn_weights, tau=current_tau, hard=False, dim=-1
-        )
-    
+        gumbel_score = F.gumbel_softmax(attn_weights,
+                                        tau=current_tau,
+                                        hard=False,
+                                        dim=-1)
+
     # 应用Softmax得到标准注意力权重
-    attn_weights = F.softmax(attn_weights.float(), dim=-1).to(query_states.dtype)
-    
+    attn_weights = F.softmax(attn_weights.float(),
+                             dim=-1).to(query_states.dtype)
+
     # 对注意力权重应用dropout
     if self.training and self.attention_dropout > 0:
         attn_weights = F.dropout(attn_weights, p=self.attention_dropout)
-    
+
     # 聚合KeyFormer分数并管理KV缓存
     if keyformer and q_len == 1:  # 在自回归生成阶段
         # 合并Gumbel注意力分数
         current_score_fn = gumbel_score.sum(0).sum(1)  # (heads, kv_len)
-        
+
         # 累积注意力分数
         if self.keyformer_score_fn is not None:
             # 将当前分数添加到过去的分数中（保持最后一个token的分数不变）
@@ -283,80 +287,94 @@ def llama_keyformer_attn_forward(
             recent_tokens = int((req_tokens * recent) / 100)
             key_tokens = req_tokens - recent_tokens
             self.keyformer_req_tokens = (recent_tokens, key_tokens)
-        
+
         # 更新累积分数
         self.keyformer_score_fn = current_score_fn
-        
+
         # 每8个迭代周期执行KV缓存压缩
         if self.keyformer_itr_count % 8 == 0 and self.keyformer_score_fn is not None:
             # 创建token掩码
-            token_mask = torch.ones(
-                self.keyformer_score_fn.shape[0], 
-                self.keyformer_score_fn.shape[1] + 1,
-                device=attn_weights.device,
-                dtype=torch.bool
-            )
-            
+            token_mask = torch.ones(self.keyformer_score_fn.shape[0],
+                                    self.keyformer_score_fn.shape[1] + 1,
+                                    device=attn_weights.device,
+                                    dtype=torch.bool)
+
             # 获取要保留的tokens的总数
             recent_tokens, key_tokens = self.keyformer_req_tokens
             total_tokens = self.keyformer_score_fn.shape[-1]
-            
+
             # 如果当前缓存大于所需的缓存
             if total_tokens > (recent_tokens + key_tokens):
                 # 保留最近的tokens
                 if recent_tokens > 0:
                     token_mask[:, :-recent_tokens] = 0
-                    key_tokens_window = self.keyformer_score_fn[:, :-recent_tokens]
+                    key_tokens_window = self.keyformer_score_fn[:, :
+                                                                -recent_tokens]
                 else:
                     key_tokens_window = self.keyformer_score_fn
-                
+
                 # 保留重要的key tokens
                 if key_tokens > 0:
-                    _, keep_topk = key_tokens_window.topk(k=key_tokens, dim=-1, largest=True)
+                    _, keep_topk = key_tokens_window.topk(k=key_tokens,
+                                                          dim=-1,
+                                                          largest=True)
                     token_mask = token_mask.scatter(-1, keep_topk, 1)
-            
+
             # 计算稀疏长度
             sparse_len = recent_tokens + key_tokens
-            
+
             # 对KV缓存应用掩码
             # 首先，处理键
             k_shape = key_states.shape
-            key_states_flat = key_states.transpose(-2, -1).reshape(bsz * self.num_heads, -1, self.head_dim)
+            key_states_flat = key_states.transpose(-2, -1).reshape(
+                bsz * self.num_heads, -1, self.head_dim)
             key_states_masked = key_states_flat[token_mask.repeat(bsz, 1, 1)]
-            key_states_new = key_states_masked.reshape(bsz, self.num_heads, sparse_len, self.head_dim).transpose(-2, -1)
-            
+            key_states_new = key_states_masked.reshape(
+                bsz, self.num_heads, sparse_len,
+                self.head_dim).transpose(-2, -1)
+
             # 然后，处理值
-            value_states_flat = value_states.reshape(bsz * self.num_heads, -1, self.head_dim)
-            value_states_masked = value_states_flat[token_mask.repeat(bsz, 1, 1)]
-            value_states_new = value_states_masked.reshape(bsz, self.num_heads, sparse_len, self.head_dim)
-            
+            value_states_flat = value_states.reshape(bsz * self.num_heads, -1,
+                                                     self.head_dim)
+            value_states_masked = value_states_flat[token_mask.repeat(
+                bsz, 1, 1)]
+            value_states_new = value_states_masked.reshape(
+                bsz, self.num_heads, sparse_len, self.head_dim)
+
             # 更新键和值
             key_states = key_states_new
             value_states = value_states_new
-            
+
             # 更新累积分数，只保留未丢弃的tokens
-            self.keyformer_score_fn = self.keyformer_score_fn[token_mask[:, :-1]]
-            self.keyformer_score_fn = self.keyformer_score_fn.reshape(self.num_key_value_heads, -1)
-    
+            self.keyformer_score_fn = self.keyformer_score_fn[
+                token_mask[:, :-1]]
+            self.keyformer_score_fn = self.keyformer_score_fn.reshape(
+                self.num_key_value_heads, -1)
+
     # 计算注意力输出
     attn_output = torch.matmul(attn_weights, value_states)
-    
+
     # 整理输出形状
-    attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
-    
+    attn_output = attn_output.transpose(1, 2).contiguous().reshape(
+        bsz, q_len, -1)
+
     # 应用输出投影
     attn_output = self.o_proj(attn_output)
-    
+
     # 更新KV缓存（如果需要）
     if past_key_value is not None and use_cache:
         # 标准KV缓存更新
-        past_key_value.update(key_states, value_states, self.layer_idx, {'sin': sin, 'cos': cos, 'cache_position': cache_position})
-        
+        past_key_value.update(key_states, value_states, self.layer_idx, {
+            'sin': sin,
+            'cos': cos,
+            'cache_position': cache_position
+        })
+
         # 更新seen_tokens
         self.kv_seq_len = key_states.shape[2]
         past_key_value._seen_tokens = self.kv_seq_len
-    
+
     # 递增KeyFormer迭代计数器
     self.keyformer_itr_count += 1
-    
+
     return attn_output, None, past_key_value
