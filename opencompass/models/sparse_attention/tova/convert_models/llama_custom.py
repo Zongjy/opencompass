@@ -5,27 +5,44 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.cache_utils import Cache
-from transformers.models.llama.modeling_llama import (apply_rotary_pos_emb,
-                                                      logger)
 from transformers import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+from transformers.cache_utils import Cache
+from transformers.models.llama.modeling_llama import (LlamaRotaryEmbedding,
+                                                      apply_rotary_pos_emb,
+                                                      logger)
+
 from ..tova_cache import TOVACache
 
+
 class OLD_LlamaRotaryEmbedding(torch.nn.Module):
-    def __init__(self, dim=None, max_position_embeddings=2048, base=10000, device=None, scale=1.0,rope_type="default",config: Optional[LlamaConfig] = None):
+
+    def __init__(self,
+                 dim=None,
+                 max_position_embeddings=2048,
+                 base=10000,
+                 device=None,
+                 scale=1.0,
+                 rope_type='default',
+                 config: Optional[LlamaConfig] = None):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
-        self.register_buffer("inv_freq", inv_freq)
+        inv_freq = 1.0 / (base
+                          **(torch.arange(0, dim, 2).float().to(device) / dim))
+        self.register_buffer('inv_freq', inv_freq)
 
         # Build here to make `torch.jit.trace` work.
         self.max_seq_len_cached = max_position_embeddings
-        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        t = torch.arange(self.max_seq_len_cached,
+                         device=self.inv_freq.device,
+                         dtype=self.inv_freq.dtype)
+        freqs = torch.einsum('i,j->ij', t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+        self.register_buffer('cos_cached',
+                             emb.cos()[None, None, :, :],
+                             persistent=False)
+        self.register_buffer('sin_cached',
+                             emb.sin()[None, None, :, :],
+                             persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -36,28 +53,41 @@ class OLD_LlamaRotaryEmbedding(torch.nn.Module):
             seq_len = seq_len.max().item() + 1
         if seq_len > self.max_seq_len_cached:
             self.max_seq_len_cached = seq_len
-            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            t = torch.arange(self.max_seq_len_cached,
+                             device=x.device,
+                             dtype=self.inv_freq.dtype)
+            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
             # Different from paper, but it uses a different permutation in order to obtain the same calculation
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
-            self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+            self.register_buffer('cos_cached',
+                                 emb.cos()[None, None, :, :],
+                                 persistent=False)
+            self.register_buffer('sin_cached',
+                                 emb.sin()[None, None, :, :],
+                                 persistent=False)
         return (
             self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
             self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
         )
 
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """This is the equivalent of torch.repeat_interleave(x, dim=1,
+    repeats=n_rep).
+
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim)
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    
+
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :,
+                                  None, :, :].expand(batch,
+                                                     num_key_value_heads,
+                                                     n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen,
+                                 head_dim)
 
 
 def tova_llama_attention_forward(
@@ -131,13 +161,11 @@ def tova_llama_attention_forward(
 
     seq_len = position_ids[0, -1].item() + 1
 
-    cos, sin = self.rotary_emb(value_states, seq_len=position_ids[0, -1].item()+1)
+    cos, sin = self.rotary_emb(value_states,
+                               seq_len=position_ids[0, -1].item() + 1)
 
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin, position_ids)
-
-
-
 
     if past_key_value is not None:
         cache_kwargs = {'sin': sin, 'cos': cos}  # Specific to RoPE models

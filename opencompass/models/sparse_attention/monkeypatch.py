@@ -1,12 +1,14 @@
+import argparse
 import os
 from importlib.metadata import version
-import argparse
+
 import torch
-from .infllm_utils import patch_hf, GreedySearch, patch_model_center
 import transformers
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           Cache, GenerationConfig, LlamaConfig)
+
 from .cake.utils import CompressConfig
+from .infllm_utils import GreedySearch, patch_hf, patch_model_center
 from .llama_model import (
     adaptive_LlamaModel_forward, llama_attn_forward_cake,
     llama_attn_forward_CAM, llama_attn_forward_H2O, llama_attn_forward_L2Norm,
@@ -40,17 +42,17 @@ from .mistral_model import (
     prepare_inputs_for_generation_mistral_new)
 
 
-def replace_llama(self, 
-                  path = None, 
-                  model_kwargs = None,
+def replace_llama(self,
+                  path=None,
+                  model_kwargs=None,
                   model_name='meta-llama/Meta-Llama-3.1-8B-Instruct',
-                  inputs = None,
-                  max_new_tokens=0,             
+                  inputs=None,
+                  max_new_tokens=0,
                   past_key_values=0):
 
     if self.method == 'pyramidkv':
         print('Using PyramidKV!')
-        
+
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
         self.model.config.window_size = self.cache_kwargs.window_size
         self.model.config.max_capacity_prompt = self.cache_kwargs.max_capacity_prompt
@@ -75,7 +77,6 @@ def replace_llama(self,
         # transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_H2O
         # transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_H2O
         transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_sdpa_attn_forward_H2O
-        
 
     elif self.method == 'cam':
         print('Using CAM!')
@@ -171,39 +172,54 @@ def replace_llama(self,
         compress_config.window_size = 32
         tau1 = 1.6
         tau2 = 0.4
-        hyper = [tau1,tau2,gamma]
+        hyper = [tau1, tau2, gamma]
         compress_config.hyper = hyper
 
         config = AutoConfig.from_pretrained(path)
         if hasattr(config, 'num_hidden_layers'):
             layers = config.num_hidden_layers
         for i in range(layers):
-            self.model.model.layers[i].self_attn.config.key_size = [compress_config.cache_size - compress_config.window_size]*layers
-            self.model.model.layers[i].self_attn.config.window_size = [compress_config.window_size]*layers
-            self.model.model.layers[i].self_attn.config.prefill = [True]*layers
-            self.model.model.layers[i].self_attn.config.decoding_evict = [None]*layers
-            self.model.model.layers[i].self_attn.config.tau1 = compress_config.hyper[0]
-            self.model.model.layers[i].self_attn.config.tau2 = compress_config.hyper[1]
-            self.model.model.layers[i].self_attn.config.gamma = compress_config.hyper[2]
+            self.model.model.layers[i].self_attn.config.key_size = [
+                compress_config.cache_size - compress_config.window_size
+            ] * layers
+            self.model.model.layers[i].self_attn.config.window_size = [
+                compress_config.window_size
+            ] * layers
+            self.model.model.layers[i].self_attn.config.prefill = [True
+                                                                   ] * layers
+            self.model.model.layers[i].self_attn.config.decoding_evict = [
+                None
+            ] * layers
+            self.model.model.layers[
+                i].self_attn.config.tau1 = compress_config.hyper[0]
+            self.model.model.layers[
+                i].self_attn.config.tau2 = compress_config.hyper[1]
+            self.model.model.layers[
+                i].self_attn.config.gamma = compress_config.hyper[2]
             from .cake.cake_cache import CakeprefillKVCache
-            self.model.model.layers[i].self_attn.config.prefill_cake_evict = [CakeprefillKVCache(
-                        cache_size=compress_config.cache_size,
-                        window_size=compress_config.window_size,
-                        k_seq_dim=2,
-                        v_seq_dim=2,
-                        num_heads=self.model.model.layers[i].self_attn.num_heads,
-                        num_layers=layers,
-                        use_cascading=compress_config.cascading
-            )]*layers
+            self.model.model.layers[i].self_attn.config.prefill_cake_evict = [
+                CakeprefillKVCache(
+                    cache_size=compress_config.cache_size,
+                    window_size=compress_config.window_size,
+                    k_seq_dim=2,
+                    v_seq_dim=2,
+                    num_heads=self.model.model.layers[i].self_attn.num_heads,
+                    num_layers=layers,
+                    use_cascading=compress_config.cascading)
+            ] * layers
         transformers.models.llama.modeling_llama.LlamaModel.forward = llama_model_forward_cake
         transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_attn_forward_cake
         transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_attn_forward_cake
 
     elif self.method == 'infllm':
         print('Using infllm!')
-        self.model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda")
-        self.model = patch_hf(self.model, self.infllm_kwargs.type, **self.infllm_kwargs)
-
+        self.model = AutoModelForCausalLM.from_pretrained(
+            path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            device_map='cuda')
+        self.model = patch_hf(self.model, self.infllm_kwargs.type,
+                              **self.infllm_kwargs)
 
     elif self.method == 'quest':
         print('Using quest!')
@@ -218,23 +234,24 @@ def replace_llama(self,
         parser.add_argument('--iterations', type=int, default=20)
         parser.add_argument('--output-file', type=str)
 
-        parser.add_argument('--quest', action='store_true', help='Enable quest attention')
+        parser.add_argument('--quest',
+                            action='store_true',
+                            help='Enable quest attention')
         parser.add_argument('--token_budget', type=int, default=1024)
         parser.add_argument('--chunk_size', type=int, default=16)
         from .Quest.evaluation.quest_attention import \
             enable_quest_attention_eval
-        args = parser.parse_args([])  # 传入空列表，强制使用默认值  # 或使用 parser.parse_args([]) 强制使用默认值
+        args = parser.parse_args(
+            [])  # 传入空列表，强制使用默认值  # 或使用 parser.parse_args([]) 强制使用默认值
 
         enable_quest_attention_eval(self.model, args)
 
     elif self.method == 'tova':
         print('Using tova!')
         from .tova.convert_models.convert import enable_tova_caching
-        from .tova.convert_models.llama_custom import \
-                OLD_LlamaRotaryEmbedding
+        from .tova.convert_models.llama_custom import OLD_LlamaRotaryEmbedding
         from .tova.tova_cache import TOVACache
-        
-    
+
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
         enable_tova_caching(self.model)
 
@@ -245,7 +262,6 @@ def replace_llama(self,
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(device)
 
-
     elif self.method == 'qfilters':
         print('Using qfilters!')
         from .qfilters.q_cache import KNormCache, QFiltersCache
@@ -255,26 +271,37 @@ def replace_llama(self,
             self.model,
             window_length=64,
             max_length=128,
-            model_name = "meta-llama/Llama-3.1-8B-Instruct",
+            model_name='meta-llama/Llama-3.1-8B-Instruct',
             **model_kwargs,
-            )
+        )
         self.past_key_values = cache
-
 
     elif self.method == 'magicpig':
         print('Using magicpig!')
-        from .MagicPIG.models.template import Templates 
         from .MagicPIG.models.llama import LLM
+        from .MagicPIG.models.template import Templates
         parser = argparse.ArgumentParser()
-        parser.add_argument('--model', type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct",help='model')
+        parser.add_argument('--model',
+                            type=str,
+                            default='meta-llama/Meta-Llama-3.1-8B-Instruct',
+                            help='model')
         parser.add_argument('--M', type=int, default=5000, help='max length')
         parser.add_argument('--D', type=int, default=1, help='dec length')
-        parser.add_argument('--G', type=int, default=256, help='generation length')
+        parser.add_argument('--G',
+                            type=int,
+                            default=256,
+                            help='generation length')
         parser.add_argument('--t', type=float, default=0.6, help='temperature')
         parser.add_argument('--K', type=int, default=10, help='K')
         parser.add_argument('--L', type=int, default=75, help='K')
-        parser.add_argument('--data', type=str, default="../data/story.txt", help='source data file')
-        parser.add_argument('--template', type=str, default="meta-llama3", help='chat template')
+        parser.add_argument('--data',
+                            type=str,
+                            default='../data/story.txt',
+                            help='source data file')
+        parser.add_argument('--template',
+                            type=str,
+                            default='meta-llama3',
+                            help='chat template')
         args = parser.parse_args([])
         print(args)
         MAX_LEN = args.M
@@ -282,19 +309,30 @@ def replace_llama(self,
         GEN_LEN = args.G
         MODEL_NAME = path
         DTYPE = torch.bfloat16
-        DEVICE = "cuda:0"
+        DEVICE = 'cuda:0'
         chat_template = Templates[args.template]
-        llm = LLM(model= None,K=args.K, L=args.L, max_length=MAX_LEN, model_name=args.model, batch_size=1, device=DEVICE, dtype=DTYPE, generation_buffer=args.G + 32)
-        print("inputs",inputs)
-        generated = llm.generate(input_ids = inputs, max_tokens=args.G, verbose=True, temperature=args.t)
+        llm = LLM(model=None,
+                  K=args.K,
+                  L=args.L,
+                  max_length=MAX_LEN,
+                  model_name=args.model,
+                  batch_size=1,
+                  device=DEVICE,
+                  dtype=DTYPE,
+                  generation_buffer=args.G + 32)
+        print('inputs', inputs)
+        generated = llm.generate(input_ids=inputs,
+                                 max_tokens=args.G,
+                                 verbose=True,
+                                 temperature=args.t)
         return generated
 
     elif self.method == 'arkvale':
         print('Using arkvale!')
         from arkvale import adapter
-        print("model_kwargs",model_kwargs)
+        print('model_kwargs', model_kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(path, **model_kwargs)
-        dev = torch.device("cuda:0")
+        dev = torch.device('cuda:0')
         dtype = torch.float16
         adapter.enable_arkvale(
             self.model,
@@ -317,10 +355,8 @@ def replace_llama(self,
     elif self.method == 'retrieval':
         print('Using RetrievalAttention!')
 
-
-
     if self.method not in ['fullkv']:
-        
+
         transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_llama_new
 
 

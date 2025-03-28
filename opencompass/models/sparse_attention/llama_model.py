@@ -1689,7 +1689,7 @@ def llama_flash_attn2_forward_H2O(
     # [SnapKV] register kv_cluster
     # print("===============replace successfully ===================")
     init_H2O(self)
-    
+
     # LlamaFlashAttention2 attention does not support output_attentions
     if 'padding_mask' in kwargs:
         warnings.warn(
@@ -3326,11 +3326,15 @@ def adaptive_LlamaModel_forward(
         attentions=all_self_attns,
     )
 
+
 def create_causal_mask(seq_length, device=None, dtype=torch.float):
-    mask = torch.triu(torch.ones(seq_length, seq_length, device=device), diagonal=1)
-    mask = mask.masked_fill(mask == 1, float('-inf')).masked_fill(mask == 0, 0.0)
+    mask = torch.triu(torch.ones(seq_length, seq_length, device=device),
+                      diagonal=1)
+    mask = mask.masked_fill(mask == 1,
+                            float('-inf')).masked_fill(mask == 0, 0.0)
     mask = mask.unsqueeze(0).unsqueeze(0)
     return mask.to(dtype)
+
 
 def llama_sdpa_attn_forward_SparQ(
     self,
@@ -3408,7 +3412,6 @@ def llama_sdpa_attn_forward_SparQ(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin)
 
-
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {
@@ -3418,9 +3421,10 @@ def llama_sdpa_attn_forward_SparQ(
         }
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-    
+
             # key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups)
-            past_key_value.update(key_states, value_states, self.layer_idx,cache_kwargs)
+            past_key_value.update(key_states, value_states, self.layer_idx,
+                                  cache_kwargs)
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
             past_key_value._seen_tokens = self.kv_seq_len
@@ -3429,7 +3433,6 @@ def llama_sdpa_attn_forward_SparQ(
             if attention_mask is not None:
                 causal_mask = causal_mask[:, :, :, :key_states.shape[-2]]
 
- 
             if query_states.device.type == 'cuda' and causal_mask is not None:
                 query_states = query_states.contiguous()
                 key_states = key_states.contiguous()
@@ -3453,7 +3456,6 @@ def llama_sdpa_attn_forward_SparQ(
 
             return attn_output, None, past_key_value
 
-
         else:
             self.kv_seq_len += q_len
             # key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -3465,26 +3467,28 @@ def llama_sdpa_attn_forward_SparQ(
             if attention_mask is not None:
                 causal_mask = causal_mask[:, :, :, :key_states.shape[-2]]
 
- 
             if query_states.device.type == 'cuda' and causal_mask is not None:
                 query_states = query_states.contiguous()
                 key_states = key_states.contiguous()
                 value_states = value_states.contiguous()
 
             is_causal = True if causal_mask is None and q_len > 1 else False
-            attn_output = self.kv_cluster.update_kv(key_states_full, 
-                                                                 query_states, 
-                                                                 value_states_full, 
-                                                                 attention_mask,
-                                                                 self.num_key_value_groups,
-                                                                 )
-            reshaped = attn_output.reshape(bsz, self.num_heads , q_len, self.head_dim)
+            attn_output = self.kv_cluster.update_kv(
+                key_states_full,
+                query_states,
+                value_states_full,
+                attention_mask,
+                self.num_key_value_groups,
+            )
+            reshaped = attn_output.reshape(bsz, self.num_heads, q_len,
+                                           self.head_dim)
             transposed = reshaped.transpose(1, 2)
-            out = transposed.reshape(bsz, q_len, self.num_heads * self.head_dim)
+            out = transposed.reshape(bsz, q_len,
+                                     self.num_heads * self.head_dim)
             return out, None, past_key_value
-        
 
     return None
+
 
 def llama_sdpa_attn_forward_Flexprefill(
     self,
