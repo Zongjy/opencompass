@@ -462,6 +462,8 @@ class HuggingFace(BaseModel):
 
         generate_start_time = time.time()
         torch.cuda.synchronize()
+        print("self.past_key_values", self.past_key_values)
+        
         outputs = self.model.generate(input_ids=input_ids,
                                       max_new_tokens=max_out_len,
                                       past_key_values=self.past_key_values,

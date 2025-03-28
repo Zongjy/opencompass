@@ -19,7 +19,7 @@ from .huggingface import HuggingFaceCausalLM  # noqa: F401
 from .huggingface import HuggingFaceChatGLM3  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFaceBaseModel  # noqa: F401
 from .huggingface_above_v4_33 import HuggingFacewithChatTemplate  # noqa: F401
-from .sparse_attention.h2o import H2OLlamaAttentionConvert_1
+from .sparse_attention.Replace_LlamaAttentionConvert import Replace_LlamaAttentionConvert
 from .sparse_attention.snap_kv import SnapKVLlamaAttentionConvert_1
 from .sparse_attention.infllm_model import INFLLM_LlamaForCausalLM
 from .hunyuan_api import Hunyuan  # noqa: F401

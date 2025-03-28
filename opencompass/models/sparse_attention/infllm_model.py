@@ -22,6 +22,7 @@ from .infllm_utils import patch_hf, GreedySearch, patch_model_center
 class INFLLM_LlamaForCausalLM(HuggingFaceCausalLM):
     def __init__(self, *args, **kwargs):
         self.infllm_kwargs = kwargs.pop('infllm_kwargs')
+        self.method = kwargs.pop('method')
         super().__init__(*args, **kwargs)
 
     def _load_model(self,

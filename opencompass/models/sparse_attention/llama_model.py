@@ -286,7 +286,6 @@ def llama_sdpa_attn_forward_PyramidKV(
             cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
-
     init_pyramidkv(self, num_hidden_layers=self.config.num_hidden_layers)
 
     bsz, q_len, _ = hidden_states.size()
@@ -1574,7 +1573,6 @@ def llama_sdpa_attn_forward_H2O(
         )
 
     init_H2O(self)
-
     bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states)
@@ -1689,7 +1687,9 @@ def llama_flash_attn2_forward_H2O(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
            Optional[Tuple[torch.Tensor]]]:
     # [SnapKV] register kv_cluster
+    # print("===============replace successfully ===================")
     init_H2O(self)
+    
     # LlamaFlashAttention2 attention does not support output_attentions
     if 'padding_mask' in kwargs:
         warnings.warn(
@@ -1700,7 +1700,6 @@ def llama_flash_attn2_forward_H2O(
         attention_mask = kwargs.pop('padding_mask')
 
     output_attentions = False
-
     bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states)
@@ -3327,6 +3326,11 @@ def adaptive_LlamaModel_forward(
         attentions=all_self_attns,
     )
 
+def create_causal_mask(seq_length, device=None, dtype=torch.float):
+    mask = torch.triu(torch.ones(seq_length, seq_length, device=device), diagonal=1)
+    mask = mask.masked_fill(mask == 1, float('-inf')).masked_fill(mask == 0, 0.0)
+    mask = mask.unsqueeze(0).unsqueeze(0)
+    return mask.to(dtype)
 
 def llama_sdpa_attn_forward_SparQ(
     self,
@@ -3403,8 +3407,7 @@ def llama_sdpa_attn_forward_SparQ(
         cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states,
                                                     cos, sin)
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+
 
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -3415,50 +3418,73 @@ def llama_sdpa_attn_forward_SparQ(
         }
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
+    
             # key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups)
-            past_key_value.update(key_states, query_states, self.layer_idx,
-                                  cache_kwargs)
+            past_key_value.update(key_states, value_states, self.layer_idx,cache_kwargs)
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+            past_key_value._seen_tokens = self.kv_seq_len
+
+            causal_mask = attention_mask
+            if attention_mask is not None:
+                causal_mask = causal_mask[:, :, :, :key_states.shape[-2]]
+
+ 
+            if query_states.device.type == 'cuda' and causal_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
+
+            is_causal = True if causal_mask is None and q_len > 1 else False
+
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=causal_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                is_causal=is_causal,
+            )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+
+            attn_output = self.o_proj(attn_output)
+
+            return attn_output, None, past_key_value
+
+
         else:
             self.kv_seq_len += q_len
-
-            key_states, value_states = past_key_value.update(
+            # key_states = repeat_kv(key_states, self.num_key_value_groups)
+            # value_states = repeat_kv(value_states, self.num_key_value_groups)
+            key_states_full, value_states_full = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs)
-            key_states, value_states = self.kv_cluster.update_kv(
-                key_states, query_states, value_states, attention_mask,
-                self.num_key_value_groups)
-        past_key_value._seen_tokens = self.kv_seq_len
+            past_key_value._seen_tokens = self.kv_seq_len
+            causal_mask = attention_mask
+            if attention_mask is not None:
+                causal_mask = causal_mask[:, :, :, :key_states.shape[-2]]
 
-    causal_mask = attention_mask
-    if attention_mask is not None:
-        causal_mask = causal_mask[:, :, :, :key_states.shape[-2]]
+ 
+            if query_states.device.type == 'cuda' and causal_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
 
-    # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-    # Reference: https://github.com/pytorch/pytorch/issues/112577.
-    if query_states.device.type == 'cuda' and causal_mask is not None:
-        query_states = query_states.contiguous()
-        key_states = key_states.contiguous()
-        value_states = value_states.contiguous()
+            is_causal = True if causal_mask is None and q_len > 1 else False
+            attn_output = self.kv_cluster.update_kv(key_states_full, 
+                                                                 query_states, 
+                                                                 value_states_full, 
+                                                                 attention_mask,
+                                                                 self.num_key_value_groups,
+                                                                 )
+            reshaped = attn_output.reshape(bsz, self.num_heads , q_len, self.head_dim)
+            transposed = reshaped.transpose(1, 2)
+            out = transposed.reshape(bsz, q_len, self.num_heads * self.head_dim)
+            return out, None, past_key_value
+        
 
-    # We dispatch to SDPA's Flash Attention or Efficient kernels via this if statement instead of an
-    # inline conditional assignment to support both torch.compile's `dynamic=True` and `fullgraph=True`
-    is_causal = True if causal_mask is None and q_len > 1 else False
-
-    attn_output = torch.nn.functional.scaled_dot_product_attention(
-        query_states,
-        key_states,
-        value_states,
-        attn_mask=causal_mask,
-        dropout_p=self.attention_dropout if self.training else 0.0,
-        is_causal=is_causal,
-    )
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-
-    attn_output = self.o_proj(attn_output)
-
-    return attn_output, None, past_key_value
-
+    return None
 
 def llama_sdpa_attn_forward_Flexprefill(
     self,

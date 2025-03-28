@@ -144,7 +144,7 @@ class QFiltersCache(Cache):
             num_layers=32,
             num_kv_heads=8,
             kv_head_dim=128).q_filters
-        self.q_filters = model
+        # self.q_filters = model
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states.
